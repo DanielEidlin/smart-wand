@@ -12,6 +12,57 @@ a reply** — parts, protocols, register/pin concepts, electrical units, fabrica
 (e.g. "ODR (output data rate — how many samples per second the sensor produces)"). Do not
 explain general programming terms; those land as condescending.
 
+## Spells
+
+A spell is `(gesture, optional incantation)` from the first commit — the incantation field
+exists and goes unused until Phase 4, and stays **per-spell optional**.
+
+| Spell | Gesture | Incantation (Phase 4) | Effect |
+| --- | --- | --- | --- |
+| Lumos | Flick up | "Lumos" | Steady warm white, **on indefinitely — no timeout** |
+| Nox | Flick down | "Nox" | Fast fade, ends **fully off** (pixel written to `0,0,0`) |
+| Expelliarmus | Forward thrust | "Expelliarmus" | Sharp red-white flash, ~300 ms |
+| Avada Kedavra | Angular zigzag (Z) | "Avada Kedavra" | Harsh green strobe, ~600 ms |
+| Expecto Patronum | Clockwise circle | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
+
+**Double-tap the wand to arm a cast** (decided 2026-08-13). This uses the IMU's hardware tap
+detector, so it costs no extra parts, no pin, no hole in the 20 mm bore, and no CPU while idle —
+and it becomes the Phase 4 mic gate for free. Neither commercial motion wand does free-running
+recognition (Kano gates on a held button, Universal on standing at a medallion), so making the
+user declare a cast is the field-tested interaction rather than a compromise. Full prior-art
+rationale in `docs/spell-spec.md` — don't re-research it.
+
+**Lumos has no timeout.** It burns until Nox is cast; the pair is the point. Two consequences to
+handle rather than design away: the brightness cap becomes the only thing setting how long a lit
+wand lasts, so pick it from measured `LedTest` numbers rather than by guess — and a low-voltage
+floor is mandatory, see **Electrical constraints**.
+
+**Nox's incantation is at-risk.** One syllable at ~300 ms is the weakest keyword in the set:
+little acoustic evidence, and near-misses all over ordinary speech ("not", "knocks"). Worth
+trying, but the per-spell-optional incantation field means dropping Nox to gesture-only is a
+one-line config change and not a redesign. Nox works by gesture regardless.
+
+### Why these five gestures separate
+
+The shapes are an engineering choice optimised for sensor separability, not a reconstruction of
+canon — **no canonical wand movements exist** for these spells (see `docs/spell-spec.md`). Each
+occupies a different corner of feature space, so thresholds can reach it:
+
+| Gesture | Primary discriminator |
+| --- | --- |
+| Flick up | Short, single-axis rotation, **positive** sign, no reversals |
+| Flick down | Same axis, **negative** sign — plus lit/unlit context as a tiebreak |
+| Thrust | **Accelerometer-dominant**: high linear accel, near-zero rotation |
+| Zigzag | **≥2 direction reversals**, high jerk |
+| Circle | **Long duration + large total angular displacement**, returns to start |
+
+Only the two flicks share a shape, and they differ in sign. The zigzag exists specifically so
+Avada Kedavra cannot collide with the Expelliarmus thrust — the failure mode if both were
+"point and stab", as the films depict them.
+
+All five are **wrist-scale, not arm-scale**, so the gyroscope carries most of the signal and the
+thrust is the deliberate exception.
+
 ## Hardware
 
 | Role | Part | Notes |
@@ -80,6 +131,17 @@ from memory. They cost hours if you get them wrong.
   classification is therefore off the table; any ML runs in software on the M4F. What the
   part *does* offer, all usable while the MCU sleeps: wake-up/activity, single & double tap,
   6D/4D orientation, free-fall, pedometer, significant motion, sensor hub.
+- **Hardware tap detection works, but the library gives you no API for it.** Verified against the
+  installed `Seeed_Arduino_LSM6DS3` 2.0.3: every register and bit-mask needed is defined —
+  `TAP_CFG1 (0x58)`, `TAP_THS_6D (0x59)`, `INT_DUR2 (0x5A)` (shock/quiet/dur fields),
+  `WAKE_UP_THS (0x5B)`, `MD1_CFG (0x5E)`, `TAP_SRC (0x1C)` — and `readRegister`/`writeRegister`
+  are public on `LSM6DS3`, so tap is configured with raw register writes. The library's own
+  `examples/FreeFallDetect/FreeFallDetect.ino` drives this same register block and is a direct
+  template. Traps: macros carry an `LSM6DS3_ACC_GYRO_` prefix and the register is `TAP_CFG1`, not
+  `TAP_CFG`; **`MD1_CFG` bit 3 is named `INT1_TAP_ENABLED` but routes *double*-tap** per the ST
+  datasheet (there is no `INT1_DOUBLE_TAP` macro — bit 6 is single-tap); leave `WAKE_UP_THS`
+  bit 7 clear to select double-tap mode; and set `FUNC_EN` in `CTRL10_C (0x19)` or the embedded
+  functions never run at all.
 - **Run the IMU FIFO continuously — wake-on-motion alone loses the start of every gesture.**
   By the time INT1 fires, the opening tens of milliseconds have already happened, and that
   is exactly the part that separates a jab from a swish. The 4 KB FIFO retains pre-trigger
@@ -105,6 +167,27 @@ from memory. They cost hours if you get them wrong.
   wiring plan; a single-diode drop or a level shifter on DIN are the usual fixes.
 - One WS2812B at full white is ~60 mA — comparable to the whole MCU's active draw. Cap
   brightness and keep effects short; this dominates the battery budget.
+- **The 14500 must be a protected cell, and the firmware needs a low-voltage floor as well.**
+  Li-ion is permanently damaged below ~2.5 V — lost capacity, plus dissolved copper that can
+  plate into internal shorts — and the onboard BQ25101 is a *charger* with **no discharge
+  protection**, so nothing on the board stops a cell being drained flat. Because Lumos never
+  times out this is the normal use case, not an edge case: cast it, set the wand down, and ~60 mA
+  walks the cell past 2.5 V unattended. Two layers doing two different jobs:
+  - **Protected cell (~2.5 V, hardware).** A protection PCB in the cell's cap end that hard
+    disconnects. Survives a firmware hang — which is the failure most likely to actually happen.
+    Establish on the bench whether the cell in hand has one; if not, it's a part to buy before
+    assembly.
+  - **Firmware floor (~3.0 V, provisional).** Extinguishes Lumos and refuses to relight, so the
+    wand degrades gracefully instead of slamming into the hard cutoff and appearing dead. It
+    **must latch**: the cell's internal resistance means voltage sags under the LED's ~60 mA and
+    recovers once it's off, so a plain per-reading comparison oscillates cut/relight/cut.
+    Calibrate it **under LED load** — a resting reading overstates what the cell delivers lit.
+
+  **A second cell is not a fix — don't re-propose it.** Series (~7.4 V) would destroy the
+  single-cell BQ25101, and series cells drain unevenly so per-cell undervoltage is invisible to
+  one ADC reading. Parallel only halves the discharge rate, which buys time against an indefinite
+  Lumos rather than protecting anything, and two 14500s are 28 mm across a 20 mm bore against a
+  1-slot holder.
 - 30 AWG is ~0.05 Ω per 10 cm. Fine for signal and for one LED, but keep the LED power
   wires short.
 
@@ -122,28 +205,40 @@ from memory. They cost hours if you get them wrong.
 
 ## Intended layout
 
-Nothing but `README.md` exists yet. Planned structure:
+Only `README.md`, `CLAUDE.md` and `docs/` exist so far — no firmware yet. Planned structure:
 
 ```
 smart-wand/
 ├── CLAUDE.md
-├── docs/implementation-plan.md   # the source plan document
+├── docs/
+│   ├── implementation-plan.md    # phased plan of record
+│   └── spell-spec.md             # gesture/incantation prior art and rationale
 ├── SmartWand/                    # main firmware sketch
 │   ├── SmartWand.ino
 │   ├── config.h                  # pins, thresholds, tunables
 │   ├── gestures.{h,cpp}
 │   ├── effects.{h,cpp}
 │   └── power.{h,cpp}
-└── bringup/                      # Phase 1 throwaway test sketches
-    ├── LedTest/LedTest.ino
-    ├── ImuTest/ImuTest.ino
-    └── BatteryTest/BatteryTest.ino
+├── bringup/                      # Phase 1 throwaway test sketches
+│   ├── LedTest/LedTest.ino
+│   ├── ImuTest/ImuTest.ino
+│   ├── TapTest/TapTest.ino
+│   ├── BatteryTest/BatteryTest.ino
+│   └── MicTest/MicTest.ino
+└── tools/                        # host-side capture scripts, run on the laptop
+    ├── capture_traces.py         # serial → labelled CSV, Edge Impulse ingestible
+    └── capture_audio.py          # raw PDM stream → per-utterance WAV
 ```
+
+`tools/` is plain Python on the host, not on the wand. It exists because the C++-only decision
+leaves no USB-drive filesystem to drop CSV and WAV files onto.
 
 ## Roadmap
 
 1. **Bench bring-up** — LED colors/patterns on flying leads; stream IMU data over serial to
    collect real gesture traces; verify battery sense and WS2812B behavior at 3.7 V.
+   **Verify hardware double-tap through a wand-like enclosure early** — arming depends on it, and
+   if it proves unreliable through the bore the cast-trigger decision needs revisiting.
    **Also dump raw PDM audio to serial and record incantation samples while the board is on
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
 2. **Firmware** — gesture recognition from accel+gyro; map gestures to spell animations
@@ -195,12 +290,11 @@ unused — don't repurpose it casually.
 
 ## Open decisions
 
-- **Which incantations, and how many?** Vocabulary size drives model size and training
-  effort. Worth fixing the word list early even though Phase 4 is far off, since Phase 1
-  should record samples for exactly those words.
-- **Which pin drives the LED?** Not yet specified. `D0` is the suggested default — corner
-  castellated pad, easy to solder, no peripheral conflict.
 - **Is BLE used?** The nRF52840 supports it and the plan never mentions it. It costs power
   and complexity; worth having only if there's a use (config, OTA, wand-to-wand duels).
 - **How many pixels at the tip?** The plan says one WS2812B. More would allow richer
   effects at a real power cost.
+
+Closed 2026-08-13. The **incantation vocabulary** is the five spell words in **Spells** plus a
+noise/other class — record samples for exactly those. The **LED is driven by `D0`**: corner
+castellated pad, easy to solder, no peripheral conflict.
