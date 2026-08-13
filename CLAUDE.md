@@ -4,6 +4,14 @@ A spell-reactive magic wand: motion gestures trigger RGB lighting effects at the
 Spoken incantations are planned as a later phase — gesture-only ships first, but the
 firmware must not foreclose voice. Arduino/C++ on a Seeed XIAO nRF52840 Sense.
 
+## Audience
+
+The author is an experienced full-stack developer and new to embedded work. **Gloss every
+embedded, hardware, or electronics term in one short sentence the first time it appears in
+a reply** — parts, protocols, register/pin concepts, electrical units, fabrication steps
+(e.g. "ODR (output data rate — how many samples per second the sensor produces)"). Do not
+explain general programming terms; those land as condescending.
+
 ## Hardware
 
 | Role | Part | Notes |
@@ -22,6 +30,16 @@ power and one digital pin for data. USB-C charges the cell through the onboard B
 ## Toolchain
 
 `arduino-cli` (v1.5.2) — already configured on this machine. Do **not** assume the Arduino IDE.
+
+**Arduino C++ everywhere, including throwaway bring-up sketches** (decided 2026-08-13). The
+board does have an official CircuitPython build and it would iterate faster during Phase 1,
+but it was rejected: Edge Impulse and TFLite-Micro deploy only as C++, so Python forecloses
+the Phase 4 voice path outright; the CircuitPython VM idles at milliamps against a
+microamp-scale budget; and its deep sleep restarts `code.py`, which cannot carry the
+`IDLE → ARMED → LISTENING → CASTING` state machine across a wake. A C++-only bring-up phase
+was chosen over a CircuitPython/C++ hybrid to keep to one toolchain and one mental model.
+Don't re-propose Python; do expect Phase 1 to need host-side scripts for serial capture,
+since there is no USB-drive filesystem to drop CSV and WAV files onto.
 
 ```
 FQBN:  Seeeduino:nrf52:xiaonRF52840Sense
@@ -55,6 +73,17 @@ from memory. They cost hours if you get them wrong.
 - **The IMU has a power-enable pin:** `PIN_LSM6DS3TR_C_POWER (15)` must be driven HIGH
   before the IMU responds. Interrupt on `PIN_LSM6DS3TR_C_INT1 (18)` — use this for
   wake-on-motion instead of polling.
+- **The IMU has no Machine Learning Core.** The LSM6DS3TR-C is not an MLC part — ST ships
+  that block on the LSM6DSOX/LSM6DSV, and publishes MLC application notes only for those.
+  Verified against the register map in `Seeed_Arduino_LSM6DS3/LSM6DS3.h`: registers stop at
+  `0x5F` with one embedded-functions bank, no `MLC*`/`EMB_FUNC*` registers. On-sensor
+  classification is therefore off the table; any ML runs in software on the M4F. What the
+  part *does* offer, all usable while the MCU sleeps: wake-up/activity, single & double tap,
+  6D/4D orientation, free-fall, pedometer, significant motion, sensor hub.
+- **Run the IMU FIFO continuously — wake-on-motion alone loses the start of every gesture.**
+  By the time INT1 fires, the opening tens of milliseconds have already happened, and that
+  is exactly the part that separates a jab from a swish. The 4 KB FIFO retains pre-trigger
+  samples; drain it on wake. It also lets the MCU wake at ~10 Hz instead of once per sample.
 - **The PDM mic has a power-enable pin too:** `PIN_PDM_PWR (19)`, clock `20`, data `21`.
 - **Battery sense is disabled at boot.** `initVariant()` drives `VBAT_ENABLE (14)` HIGH,
   which *disables* reading. Drive it LOW, then read `PIN_VBAT (32)`. Divider is 1 MΩ/510 kΩ,
@@ -126,6 +155,17 @@ smart-wand/
 
 Phase 1 exists to gather calibration data. Don't write gesture-classification logic before
 there are recorded traces to tune against.
+
+**Gestures are heuristic-first, not ML-first** (decided 2026-08-13). With no MLC on the IMU,
+a model would run on the MCU with no power advantage over hand-written logic, so it has to
+win on accuracy alone — and a small vocabulary of deliberately dissimilar gestures does not
+need it. Escalate only when the evidence demands it: windowed features and thresholds → DTW
+template matching → Edge Impulse/TFLite-Micro. Triggers for moving up a rung are more than
+~6 gestures, gestures that resemble each other, or false positives from ordinary handling.
+Keep a `GestureEngine` seam that takes a sample ring buffer and returns
+`(GestureId, confidence)` so the rungs are swappable. Segmentation — deciding where a
+gesture starts and ends — is shared by all three and is the harder half of the problem.
+The project's ML budget belongs to Phase 4 keyword spotting, where no heuristic exists.
 
 ## Designing for voice (Phase 4, deferred)
 
