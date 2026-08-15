@@ -40,8 +40,21 @@ enough to fit the 20 mm bore, reachable during a natural grip without interferin
 gesture swings (flick/thrust/zigzag/circle all still have to happen one-handed while held), and
 a precisely-placed hole in the wand shell, planned before the enclosure is epoxied shut in
 **Roadmap** step 3. None of that is hard, just undesigned — and worth doing now, before
-anything is glued. **Part TBD** — source a small momentary switch before assembly, same
-"buy before you need it" category as the protected 14500 cell in **Electrical constraints**.
+anything is glued. See **Hardware** for a candidate part found 2026-08-15, not yet ordered.
+
+**Fit math against the 20 mm bore (2026-08-15, not yet bench-verified):** the candidate's
+7.8 mm thread and 11.8 mm shoulder both clear a 20 mm bore easily — the number that matters is
+the 15.5 mm total length including its solder-lug legs. That figure overstates the real rigid
+protrusion, though: the legs are flat stamped metal, meant to be soldered to (tin the lug, tin
+the wire, join with the iron — the punched hole lets you hook the wire through first for a
+mechanical grip before soldering, worth doing since this assembly gets handled and swung
+around). **Trim the legs to length with flush cutters and bend each one ~90° once** (a single
+deliberate fold, not repeated flexing which risks fatigue-fracturing the lug) to route them
+along the bore's length instead of straight across its diameter. That leaves only the body +
+thread (~10-12 mm) as the real radial protrusion, not the full 15.5 mm. Still unverified:
+whether the XIAO board/battery/wiring occupy the bore cross-section directly opposite wherever
+the button ends up mounted along its length — that's exactly what the bore mock-up in
+**Roadmap** step 1 needs to check before drilling anything real.
 
 <details>
 <summary>Original 2026-08-13 double-tap rationale (superseded, kept for context)</summary>
@@ -94,7 +107,7 @@ thrust is the deliberate exception.
 | IMU | LSM6DS3TR-C (onboard) | 6-axis accel + gyro, gesture source |
 | Mic | PDM MEMS (onboard) | Unused until Phase 4 (incantations). Keep its pins and power budget reserved. |
 | Tip LED | WS2812B Mini RGB board | 10 mm round tile, single addressable pixel |
-| Cast button | Momentary tactile switch — **part TBD** | Held during a cast; gates the mic in Phase 4. Must fit the 20 mm bore and sit where a natural grip reaches it without blocking gesture swings. Source before assembly. |
+| Cast button | Momentary metal panel-mount switch — **candidate found, not yet ordered** | Held during a cast; gates the mic in Phase 4. AliExpress listing (2026-08-15): "8mm Buttons Metal Power On Off Push Button Mini Switch Momentary Self-reset ... Waterproof", ~₪4/$1.15, 4.8★/29 reviews/500+ sold. Confirmed momentary (not latching — verify this on any alternate listing, the two look identical in photos). Dimensions from listing photo: Φ7.8 mm thread, Φ11.8 mm shoulder, Φ7.9 mm cap, 5.8 mm thread length, 15.5 mm total incl. legs. **Verify a mounting nut is included before ordering** — not visible in listing photos. |
 | Battery | 14500 Li-ion 3.7 V 1000 mAh | In a 1-slot AA/14500 holder (no direct soldering to cell) |
 | Switch | SS12D00 1P2T slide | Breaks the battery line into BAT+ |
 | Consumables | 30 AWG silicone wire, heat shrink, epoxy, hot glue | 20 mm wand bore — no pin headers fit |
