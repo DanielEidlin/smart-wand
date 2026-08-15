@@ -25,12 +25,35 @@ exists and goes unused until Phase 4, and stays **per-spell optional**.
 | Avada Kedavra | Angular zigzag (Z) | "Avada Kedavra" | Harsh green strobe, ~600 ms |
 | Expecto Patronum | Clockwise circle | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
 
-**Double-tap the wand to arm a cast** (decided 2026-08-13). This uses the IMU's hardware tap
-detector, so it costs no extra parts, no pin, no hole in the 20 mm bore, and no CPU while idle —
-and it becomes the Phase 4 mic gate for free. Neither commercial motion wand does free-running
-recognition (Kano gates on a held button, Universal on standing at a medallion), so making the
-user declare a cast is the field-tested interaction rather than a compromise. Full prior-art
-rationale in `docs/spell-spec.md` — don't re-research it.
+**Hold a physical button to cast** (decided 2026-08-15, reversing the double-tap decision of
+2026-08-13 below). Press = start of cast (gesture + optional incantation recognized while held),
+release = end. Reason for the reversal: hardware double-tap detection was fully debugged and
+made to work (see `TAP_CFG1`/`TAP_THS_6D` gotcha below — that fix is real and stays documented
+in case tap is ever revisited for something else), single-tap detection is completely reliable,
+but *pairing* two taps into a deliberate "double" proved genuinely fragile on the bench —
+threshold, debounce, and window tuning all interact, cross-axis ringing from one strike can
+mimic two, and getting a clean double-tap without dropped or spurious pairings took far longer
+than the gesture-recognition problem it was meant to gate. A button is a deterministic signal
+with none of that: no timing windows, no false positives, near-trivial firmware (a debounced
+`digitalRead`). The cost moves from firmware to mechanical: a momentary tactile switch small
+enough to fit the 20 mm bore, reachable during a natural grip without interfering with the
+gesture swings (flick/thrust/zigzag/circle all still have to happen one-handed while held), and
+a precisely-placed hole in the wand shell, planned before the enclosure is epoxied shut in
+**Roadmap** step 3. None of that is hard, just undesigned — and worth doing now, before
+anything is glued. **Part TBD** — source a small momentary switch before assembly, same
+"buy before you need it" category as the protected 14500 cell in **Electrical constraints**.
+
+<details>
+<summary>Original 2026-08-13 double-tap rationale (superseded, kept for context)</summary>
+
+Double-tap used the IMU's hardware tap detector, so it cost no extra parts, no pin, no hole in
+the 20 mm bore, and no CPU while idle — and would have become the Phase 4 mic gate for free.
+Neither commercial motion wand does free-running recognition (Kano gates on a held button,
+Universal on standing at a medallion), so declaring a cast rather than free-running recognition
+is still the right call — the reversal is about *how* you declare it, button vs. tap, not
+whether to. Full prior-art rationale in `docs/spell-spec.md` — still relevant background, just
+not the mechanism in use.
+</details>
 
 **Lumos has no timeout.** It burns until Nox is cast; the pair is the point. Two consequences to
 handle rather than design away: the brightness cap becomes the only thing setting how long a lit
@@ -71,12 +94,15 @@ thrust is the deliberate exception.
 | IMU | LSM6DS3TR-C (onboard) | 6-axis accel + gyro, gesture source |
 | Mic | PDM MEMS (onboard) | Unused until Phase 4 (incantations). Keep its pins and power budget reserved. |
 | Tip LED | WS2812B Mini RGB board | 10 mm round tile, single addressable pixel |
+| Cast button | Momentary tactile switch — **part TBD** | Held during a cast; gates the mic in Phase 4. Must fit the 20 mm bore and sit where a natural grip reaches it without blocking gesture swings. Source before assembly. |
 | Battery | 14500 Li-ion 3.7 V 1000 mAh | In a 1-slot AA/14500 holder (no direct soldering to cell) |
 | Switch | SS12D00 1P2T slide | Breaks the battery line into BAT+ |
 | Consumables | 30 AWG silicone wire, heat shrink, epoxy, hot glue | 20 mm wand bore — no pin headers fit |
 
 Wiring: battery → slide switch → `BAT+`/`BAT-` pads on the XIAO underside. LED taps board
-power and one digital pin for data. USB-C charges the cell through the onboard BQ25101.
+power and one digital pin for data. Cast button wires to a free digital pin and `GND`, read as
+`INPUT_PULLUP` (pressed = LOW) — no external resistor needed. USB-C charges the cell through
+the onboard BQ25101.
 
 ## Toolchain
 
@@ -87,7 +113,7 @@ board does have an official CircuitPython build and it would iterate faster duri
 but it was rejected: Edge Impulse and TFLite-Micro deploy only as C++, so Python forecloses
 the Phase 4 voice path outright; the CircuitPython VM idles at milliamps against a
 microamp-scale budget; and its deep sleep restarts `code.py`, which cannot carry the
-`IDLE → ARMED → LISTENING → CASTING` state machine across a wake. A C++-only bring-up phase
+`IDLE ⇄ CASTING` state machine (see **Designing for voice**) across a wake. A C++-only bring-up phase
 was chosen over a CircuitPython/C++ hybrid to keep to one toolchain and one mental model.
 Don't re-propose Python; do expect Phase 1 to need host-side scripts for serial capture,
 since there is no USB-drive filesystem to drop CSV and WAV files onto.
@@ -131,17 +157,53 @@ from memory. They cost hours if you get them wrong.
   classification is therefore off the table; any ML runs in software on the M4F. What the
   part *does* offer, all usable while the MCU sleeps: wake-up/activity, single & double tap,
   6D/4D orientation, free-fall, pedometer, significant motion, sensor hub.
-- **Hardware tap detection works, but the library gives you no API for it.** Verified against the
-  installed `Seeed_Arduino_LSM6DS3` 2.0.3: every register and bit-mask needed is defined —
-  `TAP_CFG1 (0x58)`, `TAP_THS_6D (0x59)`, `INT_DUR2 (0x5A)` (shock/quiet/dur fields),
-  `WAKE_UP_THS (0x5B)`, `MD1_CFG (0x5E)`, `TAP_SRC (0x1C)` — and `readRegister`/`writeRegister`
-  are public on `LSM6DS3`, so tap is configured with raw register writes. The library's own
-  `examples/FreeFallDetect/FreeFallDetect.ino` drives this same register block and is a direct
-  template. Traps: macros carry an `LSM6DS3_ACC_GYRO_` prefix and the register is `TAP_CFG1`, not
-  `TAP_CFG`; **`MD1_CFG` bit 3 is named `INT1_TAP_ENABLED` but routes *double*-tap** per the ST
-  datasheet (there is no `INT1_DOUBLE_TAP` macro — bit 6 is single-tap); leave `WAKE_UP_THS`
-  bit 7 clear to select double-tap mode; and set `FUNC_EN` in `CTRL10_C (0x19)` or the embedded
-  functions never run at all.
+- **Hardware tap detection works, but is no longer used for arming** (superseded 2026-08-15 by
+  the cast button — see **Spells**). Kept here because the register-level fix was hard-won and
+  may be useful if tap is ever revisited for something else (e.g. a low-power wake source).
+  **Single-tap detection is fully reliable**, confirmed on bench. **The chip's own hardware
+  double-tap classification (`DOUBLE_TAP_EV_STATUS`) never once fired** across extensive bench
+  testing, even for deliberate taps well inside a generous timing window — every real double-tap
+  showed up as two separate single-tap events. A software layer (pairing two single-tap events
+  within a tuned window, plus a debounce floor to reject one strike's cross-axis ringing from
+  being mistaken for two taps) got double-tap working, but stayed noticeably more fragile to
+  tune than single-tap ever was — see `bringup/TapTest/TapTest.ino`'s `w`/`g` commands and git
+  history for that tuning work if it's ever needed again.
+  The library gives you no API for tap, but every register and bit-mask needed
+  is defined — `TAP_CFG1 (0x58)`, `TAP_THS_6D (0x59)`, `INT_DUR2 (0x5A)` (shock/quiet/dur fields),
+  `WAKE_UP_THS (0x5B)`, `MD1_CFG (0x5E)`, `TAP_SRC (0x1C)` — and `readRegister`/`writeRegister` are
+  public on `LSM6DS3`, so tap is configured with raw register writes.
+  **The fix that actually made it work, after a long bench debugging session:** two bits, both
+  bit 7 of their register, neither documented correctly (or at all) by the library, both required
+  or the tap engine stays completely silent no matter how correct every other register is:
+  - **`TAP_CFG1` bit 7 must be SET.** The library's header calls this bit `TIMER_EN` — that name
+    is wrong. Per a screenshot of ST's own datasheet page, the comment on this exact bit is
+    "Enable interrupts and tap detection on X, Y, Z axis": it's the master interrupt-enable for
+    the whole 6D/tap/wake-up/free-fall block, not a timer. Left clear (the library's default
+    framing), TAP_SRC never asserts, ever.
+  - **`TAP_THS_6D` bit 7 must be SET.** Not named anywhere in the library's header at all — only
+    `TAP_THS[4:0]` and `SIXD_THS[6:5]` are documented there. ST's own worked example sets it
+    regardless of what threshold value bits 4:0 hold.
+  Proof these two were the actual gap: a build using ST's literal datasheet single-tap example
+  (`CTRL1_XL=60h, TAP_CFG1=8Eh, TAP_THS_6D=89h, INT_DUR2=06h, WAKE_UP_THS=00h, MD1_CFG=40h` — see
+  `bringup/TapMinimal/TapMinimal.ino`) fired single-tap events on the first try. Every earlier
+  attempt — SparkFun's reference sequence, plus `CTRL8_XL` FDS, plus `CTRL4_C` BW_SCAL_ODR, plus
+  `CTRL10_C` FUNC_EN, all individually readback-verified as correctly written, against a
+  confirmed-live and motion-reactive accelerometer — produced zero tap events because none of
+  them ever touched these two bits.
+  **`CTRL8_XL` FDS, `CTRL4_C` BW_SCAL_ODR, and `CTRL10_C` FUNC_EN are confirmed NOT required for
+  tap** — the working datasheet-literal sequence above touches none of them. An earlier version of
+  this doc guessed FUNC_EN might be needed; that guess is now disproven. Don't re-add them.
+  Other traps, still valid: macros carry an `LSM6DS3_ACC_GYRO_` prefix and the register is
+  `TAP_CFG1`, not `TAP_CFG`; **`MD1_CFG` bit 3 is named `INT1_TAP_ENABLED` but routes *double*-tap**
+  per the ST datasheet (there is no `INT1_DOUBLE_TAP` macro — bit 6 is single-tap); **`WAKE_UP_THS`
+  bit 7 must be SET (0x80), not clear, to enable double-tap** — the library's own enum names are
+  backwards here (`SINGLE_DOUBLE_TAP_DOUBLE_TAP = 0x00`, `SINGLE_DOUBLE_TAP_SINGLE_TAP = 0x80`;
+  trust the numeric value, not the name).
+  **General lesson from this debugging session, worth remembering beyond tap specifically:** the
+  `Seeed_Arduino_LSM6DS3` header is not a reliable source of bit *meaning*, only of bit
+  *position/register* — it gets names backwards or wrong more than once in this one register
+  block alone. When a register write's effect doesn't match its library-given name, check the
+  actual ST datasheet before trusting the header comment.
 - **Run the IMU FIFO continuously — wake-on-motion alone loses the start of every gesture.**
   By the time INT1 fires, the opening tens of milliseconds have already happened, and that
   is exactly the part that separates a jab from a swish. The 4 KB FIFO retains pre-trigger
@@ -156,7 +218,11 @@ from memory. They cost hours if you get them wrong.
   as INPUT (high-Z) = 50 mA, which is a ~20 hour charge for a 1000 mAh cell. Drive it LOW
   as OUTPUT for 100 mA if that's too slow.
 - Free digital pins: `D0`–`D3` (also `A0`–`A3`). Avoid `D4`/`D5` (I2C), `D6`/`D7` (UART),
-  `D8`–`D10` (SPI) unless you're deliberately reusing them.
+  `D8`–`D10` (SPI) unless you're deliberately reusing them. `D0` is the LED (see **Closed
+  2026-08-13** in **Open decisions**); **the cast button is provisionally `D1`** (decided
+  2026-08-15) — picked only because it's next in the free-pin list, no peripheral conflict.
+  Unlike `D0`'s pad, this hasn't been checked against the board's physical castellated-pad
+  layout for solder accessibility — do that before committing to it.
 
 ## Electrical constraints
 
@@ -225,7 +291,9 @@ smart-wand/
 ├── bringup/                      # Phase 1 throwaway test sketches
 │   ├── LedTest/LedTest.ino
 │   ├── ImuTest/ImuTest.ino
-│   ├── TapTest/TapTest.ino
+│   ├── TapTest/TapTest.ino       # tap detection bench harness; superseded for arming, see Spells
+│   ├── TapMinimal/TapMinimal.ino # tap detection, literal ST datasheet sequence — same status
+│   ├── ButtonTest/ButtonTest.ino # not written yet — needs the cast button part in hand first
 │   ├── BatteryTest/BatteryTest.ino
 │   └── MicTest/MicTest.ino
 └── tools/                        # host-side capture scripts, run on the laptop
@@ -240,16 +308,19 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
 
 1. **Bench bring-up** — LED colors/patterns on flying leads; stream IMU data over serial to
    collect real gesture traces; verify battery sense and WS2812B behavior at 3.7 V.
-   **Verify hardware double-tap through a wand-like enclosure early** — arming depends on it, and
-   if it proves unreliable through the bore the cast-trigger decision needs revisiting.
+   **Source the cast button and mock up its bore placement early** — a hole through the shell,
+   reachable during a natural grip without blocking gesture swings, is the one part of the
+   button plan that's hard to change after **Assembly** step 3 glues things shut. A
+   `bringup/ButtonTest/ButtonTest.ino` (debounced press/release over serial) is trivial once the
+   part is in hand — not written yet, no part to test against.
    **Also dump raw PDM audio to serial and record incantation samples while the board is on
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
 2. **Firmware** — gesture recognition from accel+gyro; map gestures to spell animations
    (*Lumos*, *Expelliarmus*, …); idle power optimization.
 3. **Assembly** — solder 30 AWG to castellated pads, heat shrink every joint, epoxy the LED
-   into the tip as a diffuser, hot-glue the stack into the 20 mm bore. Keep the USB-C port
-   and switch lever accessible.
-4. **Incantations (deferred)** — gesture-gated keyword spotting on the PDM mic. See below.
+   into the tip as a diffuser, hot-glue the stack into the 20 mm bore. Keep the USB-C port,
+   switch lever, and cast button accessible.
+4. **Incantations (deferred)** — button-gated keyword spotting on the PDM mic. See below.
 
 Phase 1 exists to gather calibration data. Don't write gesture-classification logic before
 there are recorded traces to tune against.
@@ -276,15 +347,21 @@ than trust those figures.
 
 Four constraints to honor **now**, so Phase 4 is additive instead of a rewrite:
 
-- **Gate the mic on a gesture; never listen continuously.** Always-on wake-word detection
-  keeps the MCU out of low-power states and will destroy the 8–12 h runtime target.
-  "Raise the wand, then speak" is both the natural interaction and the cheap one. The
-  gesture engine becomes the trigger for the audio path.
+- **Gate the mic on the cast button; never listen continuously.** Always-on wake-word detection
+  keeps the MCU out of low-power states and will destroy the 8–12 h runtime target. "Hold the
+  button, then speak" is both the natural interaction and the cheap one — simpler to reason
+  about than the original gesture-triggered gate, since the button is an unambiguous digital
+  signal rather than something a gesture classifier has to first recognize.
 - **Model a spell as `(gesture, optional incantation)` from the very first commit.** If the
   spell table is keyed on gesture alone, adding a word later means reworking every call
   site. Leave the field present and unused.
-- **Structure the firmware as an explicit state machine** with `IDLE → ARMED → LISTENING →
-  CASTING` states. `LISTENING` is a no-op stub in Phases 1–3 and gets filled in at Phase 4.
+- **Structure the firmware as an explicit `IDLE ⇄ CASTING` state machine**, transitioning on
+  the button's press/release edges (superseded 2026-08-15 from an earlier `IDLE → ARMED →
+  LISTENING → CASTING` design written for tap-arming — see **Spells**). `CASTING` covers both
+  "listening for the incantation" and "running the gesture-matched effect"; there's no separate
+  `ARMED`/`LISTENING` state because the button already unambiguously marks the whole window —
+  press starts it, release ends it. The mic path is a no-op stub within `CASTING` in Phases 1–3
+  and gets filled in at Phase 4.
 - **Keep flash and RAM headroom.** Don't let gesture code, animation tables, or logging
   sprawl to fill the chip. Check `compile` output for usage as a routine habit.
 
