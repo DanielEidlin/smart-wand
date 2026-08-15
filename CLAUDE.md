@@ -179,9 +179,12 @@ from memory. They cost hours if you get them wrong.
     assembly.
   - **Firmware floor (~3.0 V, provisional).** Extinguishes Lumos and refuses to relight, so the
     wand degrades gracefully instead of slamming into the hard cutoff and appearing dead. It
-    **must latch**: the cell's internal resistance means voltage sags under the LED's ~60 mA and
-    recovers once it's off, so a plain per-reading comparison oscillates cut/relight/cut.
-    Calibrate it **under LED load** — a resting reading overstates what the cell delivers lit.
+    **must latch** — but not mainly because of IR drop, which is small here: 60 mA through a
+    healthy 14500's ~150 mΩ is only ~9 mV, and perhaps 20–40 mV once the holder contacts, slide
+    switch and 30 AWG are counted. The real driver is **relaxation** — near the bottom of the
+    discharge curve an unloaded cell recovers 50–100 mV over seconds to minutes, easily enough to
+    re-cross the floor and oscillate cut/relight/cut. Calibrate **under LED load**, and measure
+    the recovery as well as the sag.
 
   **A second cell is not a fix — don't re-propose it.** Series (~7.4 V) would destroy the
   single-cell BQ25101, and series cells drain unevenly so per-cell undervoltage is invisible to
