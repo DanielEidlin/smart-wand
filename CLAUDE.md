@@ -230,6 +230,21 @@ from memory. They cost hours if you get them wrong.
 - **Charge current defaults to 50 mA.** `initVariant()` leaves `PIN_CHARGING_CURRENT (22)`
   as INPUT (high-Z) = 50 mA, which is a ~20 hour charge for a 1000 mAh cell. Drive it LOW
   as OUTPUT for 100 mA if that's too slow.
+- **`Serial` needs `#include <Adafruit_TinyUSB.h>`, or the link fails.** On this core, `Serial`
+  is the USB-CDC object (`Adafruit_USBD_CDC`) bundled as a *library* under
+  `libraries/Adafruit_TinyUSB_Arduino`, not compiled into the core unconditionally — the
+  library's source (and the global `Serial` object itself) is only pulled into the build when
+  something in the sketch's dependency graph includes `Adafruit_TinyUSB.h`. Skip the include
+  and the linker fails with `undefined reference to Serial` / `Adafruit_USBD_CDC::begin` even
+  though `Serial.begin()`/`.print()` compile fine — the error only shows up at link time. A
+  sketch that calls `Serial.begin()` but never anything else touching `Serial` (e.g. an early
+  `blink.ino` bring-up) can link by accident with no explanation as to why, which makes this
+  easy to miss until a sketch that actually uses `Serial.println()`/`while (!Serial)` hits it.
+  Found bringing up `bringup/ButtonTest/ButtonTest.ino` (2026-08-16).
+- **`arduino-cli monitor` prints nothing and exits immediately when stdin isn't a real
+  terminal** (e.g. run from a non-interactive shell/tool). It needs a TTY. Read the port with a
+  small pyserial script instead (`serial.Serial(port, baud).readline()` in a loop) when
+  monitoring from a non-interactive context.
 - Free digital pins: `D0`–`D3` (also `A0`–`A3`). Avoid `D4`/`D5` (I2C), `D6`/`D7` (UART),
   `D8`–`D10` (SPI) unless you're deliberately reusing them. `D0` is the LED (see **Closed
   2026-08-13** in **Open decisions**); **the cast button is provisionally `D1`** (decided
@@ -306,7 +321,7 @@ smart-wand/
 │   ├── ImuTest/ImuTest.ino
 │   ├── TapTest/TapTest.ino       # tap detection bench harness; superseded for arming, see Spells
 │   ├── TapMinimal/TapMinimal.ino # tap detection, literal ST datasheet sequence — same status
-│   ├── ButtonTest/ButtonTest.ino # not written yet — needs the cast button part in hand first
+│   ├── ButtonTest/ButtonTest.ino # debounced press/release over serial — bench-verified 2026-08-16
 │   ├── BatteryTest/BatteryTest.ino
 │   └── MicTest/MicTest.ino
 └── tools/                        # host-side capture scripts, run on the laptop
@@ -323,9 +338,14 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    collect real gesture traces; verify battery sense and WS2812B behavior at 3.7 V.
    **Source the cast button and mock up its bore placement early** — a hole through the shell,
    reachable during a natural grip without blocking gesture swings, is the one part of the
-   button plan that's hard to change after **Assembly** step 3 glues things shut. A
-   `bringup/ButtonTest/ButtonTest.ino` (debounced press/release over serial) is trivial once the
-   part is in hand — not written yet, no part to test against.
+   button plan that's hard to change after **Assembly** step 3 glues things shut.
+   `bringup/ButtonTest/ButtonTest.ino` (debounced press/release over serial) is written and
+   bench-verified (2026-08-16) — but only against a stand-in 4-leg tactile switch on a
+   breadboard wired to `D1`/`GND`, not yet against the actual AliExpress candidate part
+   (still not ordered, see **Hardware**). Five press/release cycles, holds ranging ~800–1460 ms,
+   zero bounce or spurious edges through the 30 ms debounce window. One bring-up gotcha worth
+   knowing if this gets re-run: see **Board gotchas** for the `Adafruit_TinyUSB.h` include this
+   core needs before `Serial` will link.
    **Also dump raw PDM audio to serial and record incantation samples while the board is on
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
 2. **Firmware** — gesture recognition from accel+gyro; map gestures to spell animations
