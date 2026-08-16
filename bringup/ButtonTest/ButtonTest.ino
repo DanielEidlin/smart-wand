@@ -15,6 +15,7 @@ unsigned long pressStartMs = 0;
 
 void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_BLUE, OUTPUT);
   Serial.begin(115200);
   while (!Serial) {}
   Serial.println("ButtonTest ready");
@@ -35,11 +36,13 @@ void loop() {
       pressStartMs = now;
       Serial.print(now);
       Serial.println(" PRESS");
+      digitalWrite(LED_BLUE, LOW);
     } else {
       Serial.print(now);
       Serial.print(" RELEASE  held=");
       Serial.print(now - pressStartMs);
       Serial.println("ms");
+      digitalWrite(LED_BLUE, HIGH);
     }
   }
 }
