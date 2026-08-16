@@ -23,7 +23,7 @@ exists and goes unused until Phase 4, and stays **per-spell optional**.
 | Nox | Flick down | "Nox" | Fast fade, ends **fully off** (pixel written to `0,0,0`) |
 | Expelliarmus | Forward thrust | "Expelliarmus" | Sharp red-white flash, ~300 ms |
 | Avada Kedavra | Angular zigzag (Z) | "Avada Kedavra" | Harsh green strobe, ~600 ms |
-| Expecto Patronum | Clockwise circle | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
+| Expecto Patronum | Circle, either direction | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
 
 **Hold a physical button to cast** (decided 2026-08-15, reversing the double-tap decision of
 2026-08-13 below). Press = start of cast (gesture + optional incantation recognized while held),
@@ -78,6 +78,14 @@ little acoustic evidence, and near-misses all over ordinary speech ("not", "knoc
 trying, but the per-spell-optional incantation field means dropping Nox to gesture-only is a
 one-line config change and not a redesign. Nox works by gesture regardless.
 
+**Expecto Patronum accepts either rotation direction** (revised 2026-08-16, was "clockwise"
+only). Bench captures from two people (see the finding below) showed nothing in the pipeline
+actually depends on rotation sign for circle — the feature that identifies it (sustained
+low-angular-velocity motion with large total angular displacement) is direction-agnostic, and
+one of the two testers naturally circled counter-clockwise. Requiring clockwise specifically
+bought no separability, just a way to reject a valid, natural gesture. Revisit only if a future
+spell needs the opposite direction to mean something else.
+
 ### Why these five gestures separate
 
 The shapes are an engineering choice optimised for sensor separability, not a reconstruction of
@@ -88,9 +96,9 @@ occupies a different corner of feature space, so thresholds can reach it:
 | --- | --- |
 | Flick up | Short, single-axis rotation, **positive** sign, no reversals |
 | Flick down | Same axis, **negative** sign — plus lit/unlit context as a tiebreak |
-| Thrust | **Accelerometer-dominant**: high linear accel, near-zero rotation |
-| Zigzag | **≥2 direction reversals**, high jerk |
-| Circle | **Long duration + large total angular displacement**, returns to start |
+| Thrust | **Elevated linear accel** vs. that person's own flicks — *not* near-zero rotation, provisional, see finding below |
+| Zigzag | **Higher peak gyro magnitude than thrust** (provisional); direction-reversal counting not yet working, see finding below |
+| Circle | **Long duration + large total angular displacement**, returns to start, either rotation direction |
 
 Only the two flicks share a shape, and they differ in sign. The zigzag exists specifically so
 Avada Kedavra cannot collide with the Expelliarmus thrust — the failure mode if both were
@@ -98,6 +106,45 @@ Avada Kedavra cannot collide with the Expelliarmus thrust — the failure mode i
 
 All five are **wrist-scale, not arm-scale**, so the gyroscope carries most of the signal and the
 thrust is the deliberate exception.
+
+**Bench finding (2026-08-16, two people, `bringup/ImuTest/ImuTest.ino`, raw traces in
+`bringup/traces/2026-08-16_daniel/` and `bringup/traces/2026-08-16_yuval/`): the thrust/zigzag
+discriminators above are revised from the original design, not confirmed as originally written.**
+Board mounted via rubber band to a toy wand (not the final bore), USB-C toward the handle, flat
+side down — kept consistent across both sessions.
+
+- **Board-axis → wand-axis mapping (established, both people agree):** flick up and flick down
+  both load onto the board's `gy` axis (rotation about the board's Y axis), distinguished purely
+  by sign — negative for up, positive for down. Held consistently across two people, so treat
+  this as settled for this mount orientation.
+- **"Near-zero rotation" for thrust is wrong.** Every thrust rep carried substantial rotation
+  (peak gyro 426–679°/s across both people) — comparable to the flicks, not near zero. A natural
+  stabbing thrust winds up and recoils at the wrist, and that's real rotation, not sensor noise.
+- **Accelerometer-magnitude separation between thrust and the flicks is person-dependent, not a
+  safe fixed threshold.** For one person thrust's peak accel (6.63 g) was a clean 1.7–2.8× outlier
+  over both flicks; for the other it was only ~20% higher than his own flick_down (3.23 g vs.
+  2.68 g) — nearly indistinguishable. A single global accel threshold would misclassify one of
+  the two people.
+- **What held up across both people: zigzag's peak gyro magnitude consistently beat thrust's, by
+  roughly 1.5–2.3×** (1188 vs. 679°/s; 1000 vs. 426°/s), even though the absolute numbers varied a
+  lot person to person. This is the one clean, repeatable signal from this session — likely the
+  real thrust/zigzag discriminator, not accel dominance as originally assumed.
+- **Naive per-axis gyro sign-reversal counting does not work as a zigzag detector**, even with a
+  peak-to-peak swing threshold added to reject hand-tremor noise (the swing-threshold fix itself
+  is sound — same debounce logic as the button). On raw multi-rep captures it counted *more*
+  reversals for thrust (wind-up/recoil repeated across several reps in one window) than for
+  zigzag. The Z-shape likely reverses through a combined multi-axis direction change rather than
+  flipping sign cleanly on one axis; a working detector probably needs to test the 3D gyro
+  vector's *direction* for a reversal (e.g. successive-sample dot product going negative) rather
+  than watching each axis independently, and needs per-rep segmentation first so reps aren't
+  averaged together. **Not built — real Phase 2 work, not solved by this bring-up session.**
+- **Idle/rest is a solid, person-independent floor.** Both people's idle baseline landed around
+  1.1 g peak accel / <125°/s peak gyro, well clear of every real gesture (next-lowest was circle
+  at 196–365°/s). Safe to use as a wake/trigger threshold regardless of who's holding the wand.
+
+Raw labelled traces: six CSVs per person (`flick_up`, `flick_down`, `thrust`, `zigzag`, `circle`
+or `circle_ccw`, `idle`), one row per sample at 104 Hz, format `millis,label,ax,ay,az,gx,gy,gz`
+(accel in g, gyro in °/s).
 
 ## Hardware
 
@@ -348,6 +395,13 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    core needs before `Serial` will link.
    **Also dump raw PDM audio to serial and record incantation samples while the board is on
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
+   `bringup/ImuTest/ImuTest.ino` (104 Hz accel+gyro CSV, keypress-tagged labelling) is written
+   and bench-verified (2026-08-16): clean sampling (9.6 ms avg period, zero dropped samples) and
+   correct label tagging confirmed. Used for two full labelled-gesture sessions so far, board
+   rubber-banded to a toy wand (not the final bore) rather than a bare board on a desk — see
+   **Why these five gestures separate** for the resulting axis-mapping and discriminator
+   findings, and `bringup/traces/` for the raw CSVs. Both the axis mapping and the thrust/zigzag
+   discriminator got revised from their original design based on this data.
 2. **Firmware** — gesture recognition from accel+gyro; map gestures to spell animations
    (*Lumos*, *Expelliarmus*, …); idle power optimization.
 3. **Assembly** — solder 30 AWG to castellated pads, heat shrink every joint, epoxy the LED
