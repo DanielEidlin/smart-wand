@@ -150,9 +150,25 @@ def quality_note(peak: int, label: str) -> str:
     return ""
 
 
+SETTLE_SECONDS = 2
+
+
 def collect_peaks(ser: serial.Serial, seconds: int) -> list:
-    """Read LEVEL lines for a fixed duration, returning the peaks seen."""
+    """Read LEVEL lines for a fixed duration, returning the peaks seen.
+
+    Discards the first SETTLE_SECONDS so the keypress that started the phase
+    -- and the desk thump it makes through the board -- never lands in the
+    measurement. Without this the noise floor picks up a single transient
+    many times its own p90 and every statistic downstream is wrong.
+    """
+    print(f"  settling ({SETTLE_SECONDS}s)...", end="", flush=True)
+    settle_until = time.time() + SETTLE_SECONDS
+    while time.time() < settle_until:
+        read_line(ser)
+    print("\r" + " " * 30 + "\r", end="", flush=True)
+
     peaks = []
+    ser.reset_input_buffer()
     deadline = time.time() + seconds
     while time.time() < deadline:
         line = read_line(ser)
@@ -202,33 +218,45 @@ def run_calibrate(ser: serial.Serial) -> None:
     print(f"  speech: p50={speech['p50']}  p90={speech['p90']}  max={speech['max']}\n")
 
     print("=" * 62)
-    if speech["max"] <= floor["max"]:
-        print("Speech never rose above the noise floor. Either nothing was said,")
-        print("or the gain is far too low. Raise MIC_GAIN and rerun.")
+
+    # Everything below judges levels on p90, not max. A single cough, chair
+    # creak or keypress can put max many times above the real level, and any
+    # verdict driven by max then describes that transient instead of the room.
+    for name, s in (("silence", floor), ("speech", speech)):
+        if s["max"] > 3 * max(s["p90"], 1):
+            print(f"note: the {name} phase caught a transient "
+                  f"(max {s['max']} vs p90 {s['p90']}) -- ignoring it as an outlier.")
+
+    if speech["p90"] <= floor["p90"] * 1.5:
+        print("Speech did not rise meaningfully above the noise floor. Either")
+        print("nothing was said, or the gain is far too low. Raise MIC_GAIN.")
         return
 
     snr_db = 20 * math.log10(max(speech["p90"], 1) / max(floor["p50"], 1))
-    headroom_db = 20 * math.log10(32767 / max(speech["max"], 1))
+    headroom_db = 20 * math.log10(32767 / max(speech["p90"], 1))
     print(f"SNR (speech p90 over floor p50): {snr_db:5.1f} dB")
-    print(f"Headroom before clipping:        {headroom_db:5.1f} dB")
+    print(f"Headroom on speech p90:          {headroom_db:5.1f} dB")
     print()
 
-    if speech["max"] >= CLIP_PEAK:
-        print("VERDICT: clipping. Lower MIC_GAIN by ~6 (about 3 dB) and rerun.")
-    elif headroom_db < 3:
-        print("VERDICT: too close to full scale. One louder-than-usual take will")
-        print("clip. Lower MIC_GAIN by ~6 (about 3 dB) and rerun.")
-    elif speech["max"] < 6000:
+    if speech["max"] >= CLIP_PEAK or headroom_db < 6:
+        print("VERDICT: too hot. Lower MIC_GAIN by ~6 (about 3 dB) and rerun.")
+    elif speech["p90"] < 4000:
         print("VERDICT: usable but quiet -- much of the int16 range is unused.")
         print("Raise MIC_GAIN by ~6 (about 3 dB) and rerun.")
     else:
         print("VERDICT: good. Speech uses the range well with margin to spare.")
         print("If another gain value also lands here, prefer the LOWER one:")
         print("digital gain cannot improve SNR, so the extra headroom is free.")
+
+    if snr_db < 18:
+        print()
+        print(f"Heads up: {snr_db:.0f} dB SNR is on the low side. Raising the gain")
+        print("will NOT help -- it scales noise identically. Only a quieter room,")
+        print("or the mic closer to your mouth, moves this number.")
     print()
     print("If you keep this gain, paste these into tools/capture_audio.py:")
-    print(f"  NOISE_FLOOR_MAX  = {max(floor['max'], 1)}")
-    boundary = max(int(floor["max"] * 2), 3 * floor["p50"] or 1)
+    boundary = max(int(floor["p90"] * 2.5), 2000)
+    print(f"  NOISE_FLOOR_MAX  = {max(floor['p90'], 1)}")
     print(f"  SPEECH_MIN_PEAK  = {boundary}")
     print(f"  SILENCE_MAX_PEAK = {boundary}")
     print("=" * 62)
