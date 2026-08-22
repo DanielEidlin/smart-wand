@@ -31,9 +31,11 @@ Roadmap step 1.
 
 import argparse
 import datetime
+import math
 import re
 import struct
 import sys
+import time
 import wave
 from pathlib import Path
 
@@ -148,6 +150,90 @@ def quality_note(peak: int, label: str) -> str:
     return ""
 
 
+def collect_peaks(ser: serial.Serial, seconds: int) -> list:
+    """Read LEVEL lines for a fixed duration, returning the peaks seen."""
+    peaks = []
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        line = read_line(ser)
+        m = LEVEL_RE.match(line) if line else None
+        if not m:
+            continue
+        peaks.append(int(m.group(2)))
+        remaining = int(deadline - time.time())
+        bar_len = min(40, peaks[-1] * 40 // 32767)
+        print(f"\r  {remaining:2d}s left  {peaks[-1]:6d} |{'#' * bar_len:<40}|",
+              end="", flush=True)
+    print()
+    return peaks
+
+
+def stats(peaks: list) -> dict:
+    peaks = sorted(peaks)
+    n = len(peaks)
+    return {
+        "n": n,
+        "min": peaks[0],
+        "p50": peaks[n // 2],
+        "p90": peaks[int(n * 0.9)],
+        "max": peaks[-1],
+    }
+
+
+def run_calibrate(ser: serial.Serial) -> None:
+    """Measure the noise floor and speech level, then recommend gain/thresholds.
+
+    The PDM gain on this chip is digital -- it scales signal and noise by the
+    same factor, so it cannot improve SNR. The only thing to optimise is how
+    much of the int16 range gets used without ever clipping, which is why the
+    advice below prefers headroom over loudness.
+    """
+    print("Calibration has two phases. Keep the board wherever it will actually")
+    print("sit in the wand for BOTH -- moving it between phases invalidates the")
+    print("comparison.\n")
+
+    input("Phase 1/2: SILENCE. Be quiet, no music/TV/fan. Enter to start 12 s > ")
+    floor = stats(collect_peaks(ser, 12))
+    print(f"  floor: p50={floor['p50']}  p90={floor['p90']}  max={floor['max']}\n")
+
+    input("Phase 2/2: SPEECH. Say the spell words at casting volume and distance,\n"
+          "including your LOUDEST realistic delivery. Enter to start 15 s > ")
+    speech = stats(collect_peaks(ser, 15))
+    print(f"  speech: p50={speech['p50']}  p90={speech['p90']}  max={speech['max']}\n")
+
+    print("=" * 62)
+    if speech["max"] <= floor["max"]:
+        print("Speech never rose above the noise floor. Either nothing was said,")
+        print("or the gain is far too low. Raise MIC_GAIN and rerun.")
+        return
+
+    snr_db = 20 * math.log10(max(speech["p90"], 1) / max(floor["p50"], 1))
+    headroom_db = 20 * math.log10(32767 / max(speech["max"], 1))
+    print(f"SNR (speech p90 over floor p50): {snr_db:5.1f} dB")
+    print(f"Headroom before clipping:        {headroom_db:5.1f} dB")
+    print()
+
+    if speech["max"] >= CLIP_PEAK:
+        print("VERDICT: clipping. Lower MIC_GAIN by ~6 (about 3 dB) and rerun.")
+    elif headroom_db < 3:
+        print("VERDICT: too close to full scale. One louder-than-usual take will")
+        print("clip. Lower MIC_GAIN by ~6 (about 3 dB) and rerun.")
+    elif speech["max"] < 6000:
+        print("VERDICT: usable but quiet -- much of the int16 range is unused.")
+        print("Raise MIC_GAIN by ~6 (about 3 dB) and rerun.")
+    else:
+        print("VERDICT: good. Speech uses the range well with margin to spare.")
+        print("If another gain value also lands here, prefer the LOWER one:")
+        print("digital gain cannot improve SNR, so the extra headroom is free.")
+    print()
+    print("If you keep this gain, paste these into tools/capture_audio.py:")
+    print(f"  NOISE_FLOOR_MAX  = {max(floor['max'], 1)}")
+    boundary = max(int(floor["max"] * 2), 3 * floor["p50"] or 1)
+    print(f"  SPEECH_MIN_PEAK  = {boundary}")
+    print(f"  SILENCE_MAX_PEAK = {boundary}")
+    print("=" * 62)
+
+
 def run_monitor(ser: serial.Serial) -> None:
     print("Live mic level. Position the board as it'll sit in the wand and talk")
     print("from real casting distance. Ctrl+C to stop and print a summary.\n")
@@ -237,7 +323,7 @@ def run_session(ser: serial.Serial, outdir: Path, words, reps: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port", help="serial port, e.g. COM5")
-    parser.add_argument("mode", choices=["monitor", "session"])
+    parser.add_argument("mode", choices=["monitor", "calibrate", "session"])
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--speaker", help="speaker name, used in the session dir name")
     parser.add_argument("--reps", type=int, default=50, help="takes per word (default 50)")
@@ -252,6 +338,10 @@ def main() -> None:
     try:
         if args.mode == "monitor":
             run_monitor(ser)
+            return
+
+        if args.mode == "calibrate":
+            run_calibrate(ser)
             return
 
         if not args.speaker:
