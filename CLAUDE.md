@@ -395,6 +395,24 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    core needs before `Serial` will link.
    **Also dump raw PDM audio to serial and record incantation samples while the board is on
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
+   `bringup/MicTest/MicTest.ino` (16 kHz mono PDM capture: idle live-level meter, `'r'`/`'s'`
+   keypress-triggered fixed 2 s recording window, binary PCM dump over serial) is written and
+   bench-verified (2026-08-22): compiles clean (44,576 B flash / 5%, 71,748 B RAM / 30% — the
+   64 KB capture buffer is most of that), live `LEVEL,...` output visibly reactive to bench noise
+   — measured silent-room noise floor at `MIC_GAIN=40` is min 232 / median 678 / p90 1062 /
+   max 1367 over a 20 s sample (int16 scale, full scale 32767), which is mic self-noise plus room
+   ambience and is the reference every level threshold in `tools/capture_audio.py` is placed
+   against; re-measure with that script's `monitor` mode if the gain or the room changes — and a
+   triggered capture produced exactly the expected
+   32,000 samples / 64,000 bytes with correct framing. `tools/capture_audio.py` (new — the first
+   script actually in `tools/`; the IMU CSVs so far were captured without one) drove that capture
+   end-to-end and wrote a valid mono/16-bit/16 kHz WAV from it. Not yet used for a real labelled
+   incantation session (the five spell words + noise class per **Closed 2026-08-13**) — this run
+   was a plumbing check with ambient bench noise, not real recordings. The PDM library used is
+   the one bundled with the Seeeduino core itself (`libraries/PDM`, gated on
+   `ARDUINO_NRF52_ADAFRUIT`, which `platform.txt` defines for every board in this core, XIAO Sense
+   included, despite the library's own header comment claiming Adafruit-board-only) — not a
+   separately managed library, so it won't show up in `arduino-cli lib list`.
    `bringup/ImuTest/ImuTest.ino` (104 Hz accel+gyro CSV, keypress-tagged labelling) is written
    and bench-verified (2026-08-16): clean sampling (9.6 ms avg period, zero dropped samples) and
    correct label tagging confirmed. Used for two full labelled-gesture sessions so far, board
