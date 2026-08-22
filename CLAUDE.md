@@ -399,11 +399,17 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    keypress-triggered fixed 2 s recording window, binary PCM dump over serial) is written and
    bench-verified (2026-08-22): compiles clean (44,576 B flash / 5%, 71,748 B RAM / 30% — the
    64 KB capture buffer is most of that), live `LEVEL,...` output visibly reactive to bench noise
-   — measured silent-room noise floor at `MIC_GAIN=40` is min 232 / median 678 / p90 1062 /
-   max 1367 over a 20 s sample (int16 scale, full scale 32767), which is mic self-noise plus room
-   ambience and is the reference every level threshold in `tools/capture_audio.py` is placed
-   against; re-measure with that script's `monitor` mode if the gain or the room changes — and a
-   triggered capture produced exactly the expected
+   — `MIC_GAIN` is 50, chosen on the bench: at arm's length that put speech at p90 ~5700 with
+   ~15 dB headroom before clipping. **The PDM gain is digital**, applied after decimation, so it
+   scales signal and noise together and cannot improve SNR; among non-clipping values prefer the
+   lower one, since the extra headroom is free. Measured SNR at arm's length in an ordinary room
+   was only ~15.6 dB — workable but lowish, and improvable *only* by a quieter room, not by gain.
+   Don't "fix" it by recording closer: the wand really is at arm's length in use, and training on
+   cleaner audio than deployment sees is the mismatch this whole bring-up is trying to avoid.
+   The noise floor and the level thresholds in `tools/capture_audio.py` are keyed to each other
+   and to the room, so re-run `capture_audio.py <port> calibrate` (which emits the matching
+   thresholds) after any gain or room change — and a triggered capture produced exactly the
+   expected
    32,000 samples / 64,000 bytes with correct framing. `tools/capture_audio.py` (new — the first
    script actually in `tools/`; the IMU CSVs so far were captured without one) drove that capture
    end-to-end and wrote a valid mono/16-bit/16 kHz WAV from it. Not yet used for a real labelled

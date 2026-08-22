@@ -48,9 +48,18 @@ const int CHANNELS = 1;
 // The Arduino PDM library's own DEFAULT_PDM_GAIN is 20 -- i.e. -10 dB, a
 // meaningful attenuation. That's fine for a mic held near your face, but
 // incantations get spoken with the wand at arm's length and the mic
-// pointed away, so start at the hardware 0 dB point instead and raise it
-// if capture_audio.py's monitor mode shows speech sitting too low.
-const int MIC_GAIN = 40;
+// pointed away, so the hardware 0 dB point is the floor to start from.
+//
+// 50 (+5 dB) is the bench-chosen value: at arm's length it put speech at
+// p90 ~5700 with ~15 dB of headroom before clipping. Raising it further
+// would only eat headroom -- this gain is DIGITAL, applied after the mic's
+// bitstream is decimated, so it scales signal and noise by the same factor
+// and cannot improve SNR. Among values that don't clip, prefer the lower.
+//
+// Re-run `capture_audio.py <port> calibrate` after any change to this
+// value or to the recording room: it emits the matching level thresholds,
+// which are keyed to the noise floor and go stale when the gain moves.
+const int MIC_GAIN = 50;
 const unsigned long MAX_CAPTURE_MS = 2000;  // covers "Expecto Patronum" (longest incantation) plus margin
 const size_t CAPTURE_MAX_SAMPLES = (SAMPLE_RATE_HZ * MAX_CAPTURE_MS) / 1000;
 
