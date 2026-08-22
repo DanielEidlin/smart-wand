@@ -23,7 +23,7 @@ exists and goes unused until Phase 4, and stays **per-spell optional**.
 | Nox | Flick down | "Nox" | Fast fade, ends **fully off** (pixel written to `0,0,0`) |
 | Expelliarmus | Forward thrust | "Expelliarmus" | Sharp red-white flash, ~300 ms |
 | Avada Kedavra | Angular zigzag (Z) | "Avada Kedavra" | Harsh green strobe, ~600 ms |
-| Expecto Patronum | Circle, either direction | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
+| Expecto Patronum | Circle(s), either direction, any count | "Expecto Patronum" | Light blue-silver shimmer, ~2 s |
 
 **Hold a physical button to cast** (decided 2026-08-15, reversing the double-tap decision of
 2026-08-13 below). Press = start of cast (gesture + optional incantation recognized while held),
@@ -86,6 +86,21 @@ one of the two testers naturally circled counter-clockwise. Requiring clockwise 
 bought no separability, just a way to reject a valid, natural gesture. Revisit only if a future
 spell needs the opposite direction to mean something else.
 
+**Expecto Patronum accepts any number of circles** (added 2026-08-22, from bench feel rather
+than from data: a single slow circle is anticlimactic to perform, and the natural instinct is to
+keep circling). Threshold on **cumulative** angular displacement with no upper bound, not on one
+completed 360 deg revolution. This costs nothing and arguably helps: N circles pushes further
+along the very axis that already separates circle from every other gesture (sustained
+low-angular-velocity motion with large total displacement), so it moves *away* from the flick,
+thrust and zigzag clusters rather than toward them. It is free specifically **because the cast is
+button-gated** — press starts the window, release ends it, so a variable-length gesture needs no
+timeout, no segmentation heuristic, and no upper bound. It also fixes an ergonomic mismatch: the
+longest incantation in the set was previously paired with a fixed-length movement, which meant
+racing the word to fit the gesture. Now you circle while you speak and release on the last
+syllable. Changing the gesture shape instead was considered and rejected — the five shapes are
+chosen for separability, any replacement must prove it doesn't collide with a flick, thrust or
+zigzag, and there is no canon to appeal to (see `docs/spell-spec.md`).
+
 ### Why these five gestures separate
 
 The shapes are an engineering choice optimised for sensor separability, not a reconstruction of
@@ -98,7 +113,7 @@ occupies a different corner of feature space, so thresholds can reach it:
 | Flick down | Same axis, **negative** sign — plus lit/unlit context as a tiebreak |
 | Thrust | **Elevated linear accel** vs. that person's own flicks — *not* near-zero rotation, provisional, see finding below |
 | Zigzag | **Higher peak gyro magnitude than thrust** (provisional); direction-reversal counting not yet working, see finding below |
-| Circle | **Long duration + large total angular displacement**, returns to start, either rotation direction |
+| Circle | **Long duration + large CUMULATIVE angular displacement** at low angular velocity, either rotation direction, no upper bound on revolutions |
 
 Only the two flicks share a shape, and they differ in sign. The zigzag exists specifically so
 Avada Kedavra cannot collide with the Expelliarmus thrust — the failure mode if both were
@@ -288,6 +303,18 @@ from memory. They cost hours if you get them wrong.
   `blink.ino` bring-up) can link by accident with no explanation as to why, which makes this
   easy to miss until a sketch that actually uses `Serial.println()`/`while (!Serial)` hits it.
   Found bringing up `bringup/ButtonTest/ButtonTest.ino` (2026-08-16).
+- **A single large `Serial.write()` stalls permanently on this core's USB-CDC.** Dumping a 96 KB
+  buffer in one call delivered exactly 30,208 bytes at 14.7 KB/s and then nothing, forever, on
+  every attempt (measured 2026-08-22 with `bringup/MicTest`). Deterministic, not a race. The fix
+  is to write in small chunks (512 B), `Serial.flush()` and `yield()` between them, and **add the
+  return value of `Serial.write()` to your offset rather than assuming it accepted everything** —
+  it returns a count, and ignoring it silently drops data. Chunked, the same 96 KB transfers in
+  0.19 s at 498 KB/s, i.e. 34x faster *and* complete. The dangerous part is the symptom: a
+  truncated audio capture still sounds fine and still scores 40+ dB SNR, so nothing downstream
+  flags it. Also make the host read defensively — `pyserial`'s `timeout` is a deadline for the
+  whole `read()` call, not an idle timeout, so `ser.read(96000)` returns a partial buffer without
+  raising. Read in chunks until the stream actually goes quiet (see `read_exact()` in
+  `tools/capture_audio.py`).
 - **`arduino-cli monitor` prints nothing and exits immediately when stdin isn't a real
   terminal** (e.g. run from a non-interactive shell/tool). It needs a TTY. Read the port with a
   small pyserial script instead (`serial.Serial(port, baud).readline()` in a loop) when
@@ -370,7 +397,11 @@ smart-wand/
 │   ├── TapMinimal/TapMinimal.ino # tap detection, literal ST datasheet sequence — same status
 │   ├── ButtonTest/ButtonTest.ino # debounced press/release over serial — bench-verified 2026-08-16
 │   ├── BatteryTest/BatteryTest.ino
-│   └── MicTest/MicTest.ino
+│   ├── MicTest/MicTest.ino
+│   ├── traces/                   # labelled IMU CSVs, per date_speaker
+│   └── traces_audio/             # labelled incantation WAVs, per date_speaker_tag
+│                                 #   each dir also holds takes.csv (label, tag,
+│                                 #   duration, peak, in-band SNR per take)
 └── tools/                        # host-side capture scripts, run on the laptop
     ├── capture_traces.py         # serial → labelled CSV, Edge Impulse ingestible
     └── capture_audio.py          # raw PDM stream → per-utterance WAV
@@ -397,19 +428,96 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    the bench** — this is nearly free now and annoying to redo once the wand is epoxied shut.
    `bringup/MicTest/MicTest.ino` (16 kHz mono PDM capture: idle live-level meter, `'r'`/`'s'`
    keypress-triggered fixed 2 s recording window, binary PCM dump over serial) is written and
-   bench-verified (2026-08-22): compiles clean (44,576 B flash / 5%, 71,748 B RAM / 30% — the
+   bench-verified (2026-08-22): compiles clean (44,528 B flash / 5%, 71,748 B RAM / 30% — the
    64 KB capture buffer is most of that), live `LEVEL,...` output visibly reactive to bench noise
-   — `MIC_GAIN` is 50, chosen on the bench: at arm's length that put speech at p90 ~5700 with
-   ~15 dB headroom before clipping. **The PDM gain is digital**, applied after decimation, so it
-   scales signal and noise together and cannot improve SNR; among non-clipping values prefer the
-   lower one, since the extra headroom is free. Measured SNR at arm's length in an ordinary room
-   was only ~15.6 dB — workable but lowish, and improvable *only* by a quieter room, not by gain.
-   Don't "fix" it by recording closer: the wand really is at arm's length in use, and training on
-   cleaner audio than deployment sees is the mismatch this whole bring-up is trying to avoid.
-   The noise floor and the level thresholds in `tools/capture_audio.py` are keyed to each other
-   and to the room, so re-run `capture_audio.py <port> calibrate` (which emits the matching
-   thresholds) after any gain or room change — and a triggered capture produced exactly the
-   expected
+   — `MIC_GAIN` is **40** (the hardware 0 dB point), settled on the bench 2026-08-22 after a run
+   at 50 (+5 dB) was walked back. At arm's length gain 40 puts speech at raw peak ~1500-2600 with
+   over 20 dB of headroom. **The PDM gain is digital**, applied after decimation, so it scales
+   signal and noise together and cannot improve SNR. **Don't sweep the gain looking for a better
+   value** — it is a pure multiply, so a single `calibrate` run predicts every other gain
+   arithmetically (`level × 10^(dB/20)`, 0.5 dB per register step), and no value in the
+   register's range can even clip speech from here.
+
+   **Measure audio levels BAND-LIMITED to 300-3400 Hz. Raw sample amplitude on this mic measures
+   something else entirely** (established 2026-08-22 from six diagnostic takes at arm's length,
+   gain 40, in `scratchpad`; the analysis is reproducible from any capture):
+
+   | | broadband | 300-3400 Hz |
+   | --- | --- | --- |
+   | noise floor RMS | 375.1 | **4.9** |
+   | noise floor peak | 1430 | 460 |
+
+   **100% of the noise energy sits below 100 Hz**, and it is not a DC offset (mean is only
+   −18..−81 counts). It is real infrasonic rumble — hand tremor, air movement, body motion, the
+   mic's own 1/f noise — and nothing in the chain was high-passing it. Speech lives at
+   300-3400 Hz, which is also all an MFCC front-end ever sees, so that rumble is invisible to the
+   Phase 4 model and must be invisible to the tooling's thresholds too.
+
+   **In-band SNR at true arm's length is 24-38 dB — incantations are comfortably viable at
+   casting distance.** Per take: `expelliarmus` 30.3 dB normal / 37.7 dB projected, `nox`
+   25.8 dB normal / 24.0 dB quiet. Note that even Nox — the one-syllable word flagged above as
+   the at-risk incantation — has ample level; its risk is acoustic confusability with ordinary
+   speech, **not** signal strength, so don't try to solve it with gain or distance.
+
+   Everything measured before this finding was measuring rumble: three `calibrate` runs reported
+   9.2-15.6 dB "SNR" for audio actually carrying 24-38 dB, and the QC thresholds would have
+   rejected a good quiet `nox` (raw peak 895, in-band SNR 31 dB) as silence. Two corollaries that
+   cost hours each and should not be re-derived: **the noise floor is not the room** (fan on/door
+   open vs fan off/door shut moved the gain-40 floor from p50 678 to p50 638 — nothing), and
+   **speech level is not a stable number** (~2 dB run-to-run variance from delivery alone, which
+   is larger than most effects worth chasing — never conclude anything from a single short run).
+
+   `MicTest.ino` now high-passes at 300 Hz before computing the level meter and emits
+   `LEVEL,<ms>,<peak>,<rms>` — both of the filtered signal. **Recordings stay raw**; the Phase 4
+   training pipeline owns its own preprocessing. `tools/capture_audio.py` judges every take on
+   band-limited energy (loudest 50 ms frame, counts RMS, as dB over `NOISE_BAND_RMS = 5.0`;
+   pass is >20 dB for a word, <22 dB for a `silence` take) and treats the `rms` field as optional
+   so it still runs against un-reflashed firmware, with a warning.
+
+   Two measurement traps already hit and fixed in `calibrate`, worth knowing before writing any
+   similar bench tool: a **settle window** is mandatory (the keypress that starts a phase thumps
+   the board), and a **speech-presence gate** is mandatory (the statistic is a p90 over 200 ms
+   windows, so without gating it silently measures how much of the window you spent *talking*
+   rather than how *loudly* — that artifact alone drifted three runs 4.5 dB apart).
+
+   **Motion is what sets the headroom budget, and it locks MIC_GAIN at 40** (measured
+   2026-08-22, board handheld at arm's length, word spoken while performing the gesture):
+
+   | condition | raw peak | LF (<300 Hz) RMS | in-band noise | word SNR | headroom |
+   | --- | --- | --- | --- | --- | --- |
+   | standing still | 1181-2034 | 114-166 | 1.7-2.2 | 39-43 dB | 24-29 dB |
+   | forward thrust | 5063-8691 | ~1200 | 2.4-6.6 | 47-48 dB | 12-16 dB |
+   | **zigzag (Avada Kedavra)** | **14225-17826** | ~4400 | 12-24 | 54-55 dB | **5-7 dB** |
+
+   Swinging the wand multiplies sub-300 Hz energy by ~30x and the raw peak by ~9x. The zigzag is
+   3.6x worse than the thrust — consistent with it having the highest peak gyro of any gesture
+   (1188 vs 679 deg/s, see **Why these five gestures separate**), and it is *sustained*, so violent
+   motion overlaps the whole utterance instead of trailing one jab. **Nothing clipped at gain 40,
+   but at gain 50 that same cast computes to ~31,700 against a 32,767 ceiling — it would clip.**
+   Clipping would destroy the *speech*, not just the rumble, because saturation hits the summed
+   waveform before any filter can separate them. So: **never raise MIC_GAIN above 40**; if a
+   future cast ever clips, lower it. This is also why the clipping check in `capture_audio.py` is
+   deliberately broadband while every level check is band-limited.
+
+   **In-band SNR is unharmed by motion** — it measured *higher* while casting (54 dB vs 43 dB
+   still), because people naturally project when performing the gesture. Motion raises the
+   in-band noise floor from ~1.6 to 12-24 counts, real but ~35 dB below the word. Recording
+   training data while actually casting costs nothing in signal quality, and avoids training on
+   audio cleaner than deployment will ever be.
+
+   **Correction to an earlier finding: room quiet DOES matter, in-band.** The fan-on/fan-off
+   comparison that concluded "the floor is not the room" was measuring the broadband floor, which
+   is rumble, and was blind to in-band noise by construction. Measured properly, the in-band floor
+   went from 4.9 counts RMS (ordinary quiet room) to **1.6** with noise sources deliberately off —
+   ~10 dB. Both statements are true at their own frequencies: **sub-100 Hz rumble is
+   room-independent and is the mic and your hand; 300-3400 Hz noise is the room and responds to
+   quieting it.** `NOISE_BAND_RMS = 5.0` in `capture_audio.py` is therefore a room-dependent
+   reference, not a constant of the hardware — the QC margin (~11 dB) absorbs the variation.
+
+   Don't "fix" a low reading by recording closer: the wand really is at arm's length in use, and
+   training on cleaner audio than deployment sees is the mismatch this whole bring-up is trying
+   to avoid.
+   A triggered capture produced exactly the expected
    32,000 samples / 64,000 bytes with correct framing. `tools/capture_audio.py` (new — the first
    script actually in `tools/`; the IMU CSVs so far were captured without one) drove that capture
    end-to-end and wrote a valid mono/16-bit/16 kHz WAV from it. Not yet used for a real labelled
@@ -446,6 +554,61 @@ Keep a `GestureEngine` seam that takes a sample ring buffer and returns
 `(GestureId, confidence)` so the rungs are swappable. Segmentation — deciding where a
 gesture starts and ends — is shared by all three and is the harder half of the problem.
 The project's ML budget belongs to Phase 4 keyword spotting, where no heuristic exists.
+
+## Incantation recording plan (Phase 1, IN PROGRESS — resume here)
+
+Audio bring-up is **complete and proven** (2026-08-22): gain locked, levels understood,
+tooling debugged, two silent data-corruption bugs found and fixed. What remains is simply
+recording the labelled set. **This is real training data, not a bench test.**
+
+**State:** 5 takes of `lumos` recorded in `bringup/traces_audio/2026-08-22_daniel_normal/`
+(a deliberate pilot, verified take by take before committing to the rest). Everything else
+below is still to do.
+
+**How a take works now.** The operator starts AND stops each take — Enter, perform, Enter —
+mirroring the cast button's press/release. There is no fixed recording window, deliberately;
+see `MAX_CAPTURE_MS` in `MicTest.ino`. A normal take runs ~1.1-1.6 s with a ~500 ms lead-in
+before the word, which is realistic (the button is pressed before you speak) and worth keeping.
+
+**Batches.** Record by *condition*, one batch at a time, rather than mixing variation within a
+run — delivery stays consistent inside a batch, and a bad batch is re-recorded rather than
+hunted for. `--tag` names the condition: it becomes part of the directory name AND a column in
+`takes.csv`, which also records duration, raw peak and in-band SNR per take. The condition is
+not recoverable from the audio afterwards, so it has to be written at capture time.
+
+```bash
+SPELLS="lumos nox expelliarmus avada_kedavra expecto_patronum"
+P=/dev/cu.usbmodem101
+
+python3 tools/capture_audio.py $P session --speaker daniel --tag normal  --words $SPELLS --reps 20
+python3 tools/capture_audio.py $P session --speaker daniel --tag gesture --words $SPELLS --reps 10
+python3 tools/capture_audio.py $P session --speaker daniel --tag quiet   --words $SPELLS --reps 5
+python3 tools/capture_audio.py $P session --speaker daniel --tag loud    --words $SPELLS --reps 5
+python3 tools/capture_audio.py $P session --speaker daniel --tag fast    --words $SPELLS --reps 5
+python3 tools/capture_audio.py $P session --speaker daniel --tag still   --words silence other --reps 20
+python3 tools/capture_audio.py $P session --speaker daniel --tag gesture --words silence --reps 20
+```
+
+Every run is independently resumable (progress is counted from files on disk, never from a
+counter), so `q` out any time and rerun the same line. `n` skips to the next word. A run walks
+the word list in order — all reps of one word, then the next — so a single word per invocation
+is also fine and easier on the voice.
+
+**Things that will otherwise surprise whoever resumes this:**
+
+- **The `gesture` batches are not optional colour.** Deployment always involves motion, and the
+  `gesture`+`silence` batch (casting with no words at all) covers the single most common real
+  input: incantations are *per-spell optional*, so the model must confidently produce nothing
+  for a gesture-only cast. Nothing else in the set teaches that.
+- **The `quiet` batch will trip the "only N dB in-band" warning. Do not redo those takes** —
+  the audio is supposed to be quiet, and the flag is the threshold working, not a failure.
+- **Never change `MIC_GAIN` mid-set.** It is locked at 40 by the clipping evidence above; a
+  change also makes takes recorded before and after mutually inconsistent.
+- **Second speaker.** Repeat every batch with `--speaker yuval`, matching the gesture traces,
+  which already have two people.
+- **Repo size.** Raw audio is committed alongside the IMU CSVs (same convention). The pilot is
+  224 KB; a full two-speaker set lands around 25-30 MB. Fine for git, but worth a deliberate
+  decision (git-lfs, or excluding audio) before pushing the whole thing.
 
 ## Designing for voice (Phase 4, deferred)
 

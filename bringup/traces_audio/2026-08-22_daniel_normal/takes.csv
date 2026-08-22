@@ -1,0 +1,6 @@
+file,label,tag,samples,duration_ms,raw_peak,inband_snr_db,recorded_at
+lumos_01.wav,lumos,normal,26112,1632,479,25.8,2026-08-22T18:43:20
+lumos_02.wav,lumos,normal,22016,1376,596,27.1,2026-08-22T18:43:24
+lumos_03.wav,lumos,normal,24576,1536,429,24.9,2026-08-22T18:43:28
+lumos_04.wav,lumos,normal,18176,1136,468,23.3,2026-08-22T18:43:31
+lumos_05.wav,lumos,normal,17408,1088,487,24.0,2026-08-22T18:43:35
