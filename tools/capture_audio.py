@@ -53,7 +53,10 @@ from pathlib import Path
 
 import serial
 
-CAPTURE_HEADER_RE = re.compile(rb"^CAPTURE,(\d+),(\d+),(\d+)$")
+# MicTest emits "CAPTURE,<samples>,<rate>,<channels>,<gain>". Firmware from
+# before 2026-08-23 omitted the gain field, so it is optional and the take is
+# recorded with an empty mic_gain rather than refused.
+CAPTURE_HEADER_RE = re.compile(rb"^CAPTURE,(\d+),(\d+),(\d+)(?:,(\d+))?$")
 # MicTest emits "LEVEL,<ms>,<peak>,<rms>" -- peak and rms are both of the
 # HIGH-PASSED signal. Older firmware emitted only "LEVEL,<ms>,<peak>" with no
 # filtering at all; the third group is optional so this script still runs
@@ -97,19 +100,42 @@ DEFAULT_WORDS = [
 BAND_LO_HZ = 300
 BAND_HI_HZ = 3400
 
-# In-band noise floor, counts RMS. From the two silence takes above.
-NOISE_BAND_RMS = 5.0
+# In-band noise floor, counts RMS. Depends on BOTH the room and MIC_GAIN, so
+# re-measure it whenever either moves. Measured floors so far, all at arm's
+# length:
+#   MIC_GAIN=40:  1.4  noise sources deliberately off (2026-08-22 lumos pilot)
+#   MIC_GAIN=40:  4.9  "ordinary quiet room" (2026-08-22 diagnostic takes)
+#   MIC_GAIN=40:  8.8  ordinary room, PC fans running (2026-08-23)
+#   MIC_GAIN=28:  4.4  same room, after the -6 dB gain change   <- current
+#
+# Two independent things move this number and they must not be confused:
+#   ROOM  changes the actual acoustic noise, and DOES change in-band SNR.
+#   GAIN  is a pure digital multiply after decimation, so it scales the floor
+#         and the speech together and CANNOT change in-band SNR. The 8.8 -> 4.4
+#         step is exactly the -6 dB gain change and nothing else; every SNR in
+#         dB is unaffected by it, which is why the thresholds below did not move.
+#
+# The 2026-08-23 set is recorded with the fans ON deliberately: a wand is used
+# in a room that has noise in it, and training on audio cleaner than deployment
+# ever sees is the mismatch this whole bring-up exists to avoid.
+NOISE_BAND_RMS = 4.4
 
 # A take's level is the loudest 50 ms frame of its band-limited signal, in
-# counts RMS, expressed as dB over NOISE_BAND_RMS. Measured on the diagnostic
-# takes, which is where these thresholds come from:
-#   silence_01       11.5  ->  7.2 dB      expelliarmus_01  376.3 -> 37.6 dB
-#   silence_02       46.2 -> 19.3 dB       expelliarmus_02  926.1 -> 45.4 dB
-#   (silence_02 caught a real transient)   nox_01           225.6 -> 33.1 dB
-#                                          nox_02 (quiet)   175.2 -> 30.9 dB
-# 20 dB leaves ~11 dB of margin under the quietest good take.
-SPEECH_MIN_SNR_DB = 20.0
-SILENCE_MAX_SNR_DB = 22.0
+# counts RMS, expressed as dB over NOISE_BAND_RMS. These thresholds only have
+# to separate "you spoke" from "the take missed you" -- they are a capture-time
+# smoke test, NOT a judgement on whether audio is good enough to train on.
+#
+# Re-derived 2026-08-23 against the fans-on floor of 8.8 counts:
+#   silence takes (measured)     10-12 counts  ->  1-2 dB
+#   lumos, soft word (pilot)             89    ->    20 dB
+#   nox / expelliarmus (diagnostic) 175-926    -> 26-40 dB
+# 13 dB sits ~11 dB above silence and ~7 dB below the softest real word.
+#
+# Do NOT re-raise these to chase the old numbers: the previous 20/22 dB pair
+# was set against a 5.0-count floor, and at 8.8 it would flag every ordinary
+# take of a soft word like "lumos" as a failure.
+SPEECH_MIN_SNR_DB = 13.0
+SILENCE_MAX_SNR_DB = 8.0
 
 # Clipping IS a raw-amplitude phenomenon -- int16 saturates at 32767 whatever
 # the frequency -- so this one is deliberately not band-limited.
@@ -237,7 +263,7 @@ def read_exact(ser: serial.Serial, need: int):
 def do_capture(ser: serial.Serial, outdir: Path, label: str):
     """Trigger one recording, write it to a WAV.
 
-    Returns (path, peak, num_samples, sample_rate, samples).
+    Returns (path, peak, num_samples, sample_rate, samples, mic_gain).
     """
     time.sleep(CAPTURE_SETTLE_S)
     ser.reset_input_buffer()
@@ -258,7 +284,8 @@ def do_capture(ser: serial.Serial, outdir: Path, label: str):
             continue
         m = CAPTURE_HEADER_RE.match(line)
         if m:
-            num_samples, sample_rate, channels = (int(x) for x in m.groups())
+            num_samples, sample_rate, channels = (int(x) for x in m.groups()[:3])
+            mic_gain = int(m.group(4)) if m.group(4) else None
             break
         if line.startswith(b"#") and b"RECORDING" not in line:
             print(line.decode(errors="replace"))
@@ -278,6 +305,17 @@ def do_capture(ser: serial.Serial, outdir: Path, label: str):
     read_line(ser)
     read_line(ser)
 
+    # A capture that yields nothing is a failed take, not a quiet one. Writing
+    # it would create a 0-frame WAV that still occupies a numbered slot and
+    # still satisfies the rep count -- so the session would consider the word
+    # finished and move on, leaving a take that no longer exists as far as any
+    # training pipeline is concerned. Seen once for real on 2026-08-23, right
+    # after a reconnect. Refuse it and let the operator simply record again.
+    if num_samples == 0:
+        print("! capture returned 0 samples -- failed take, nothing written. "
+              "Press Enter to try again.", file=sys.stderr)
+        return None
+
     samples = list(struct.unpack(f"<{num_samples}h", payload))
     peak = max((abs(s) for s in samples), default=0)
 
@@ -288,7 +326,7 @@ def do_capture(ser: serial.Serial, outdir: Path, label: str):
         w.setframerate(sample_rate)
         w.writeframes(payload)
 
-    return path, peak, num_samples, sample_rate, samples
+    return path, peak, num_samples, sample_rate, samples, mic_gain
 
 
 MANIFEST = "takes.csv"
@@ -305,7 +343,7 @@ def append_manifest(outdir: Path, row: dict):
     """
     path = outdir / MANIFEST
     header = ["file", "label", "tag", "samples", "duration_ms",
-              "raw_peak", "inband_snr_db", "recorded_at"]
+              "raw_peak", "inband_snr_db", "mic_gain", "recorded_at"]
     exists = path.exists()
     with path.open("a", encoding="utf-8") as f:
         if not exists:
@@ -313,9 +351,55 @@ def append_manifest(outdir: Path, row: dict):
         f.write(",".join(str(row[k]) for k in header) + "\n")
 
 
+# biquad() starts with zero state, so the first samples out of band_limit()
+# are the filter's own step response to the signal's standing DC/rumble offset,
+# not audio. It decays in a few ms but lands wholly inside the first 50 ms
+# frame, which is the frame loudest_frame_rms() may then pick as the take's
+# level. On a take containing a word this is harmless (the word is 20+ dB
+# louder), but on silence/quiet takes it IS the maximum: it inflated one
+# measured silence take by 9.9 dB, over half the distance to a false
+# "not silent, redo" (2026-08-23). Discard the warm-up before measuring.
+FILTER_WARMUP_MS = 100
+
+
+def last_take_name(outdir: Path, label: str):
+    """Highest-numbered existing take for a label, or None.
+
+    Zero-padded 2-digit numbering means plain lexical sort is also numeric
+    order (lumos_09 < lumos_10), which holds to 99 takes per word.
+    """
+    takes = sorted(outdir.glob(f"{label}_*.wav"))
+    return takes[-1].name if takes else None
+
+
+def remove_take(outdir: Path, name: str):
+    """Delete one take's WAV *and* its manifest row, together.
+
+    These have to move as a pair. append_manifest() only appends, and
+    next_take_path() reuses a freed number -- so deleting just the WAV and
+    re-recording leaves the bad take's row in place and adds a second row with
+    the identical filename. Anything reading takes.csv later then sees one file
+    with two different SNRs and no way to tell which describes the audio that
+    actually survived.
+    """
+    (outdir / name).unlink(missing_ok=True)
+    path = outdir / MANIFEST
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    path.write_text(
+        "".join(ln for ln in lines if not ln.startswith(f"{name},")),
+        encoding="utf-8",
+    )
+
+
 def quality_note(samples, sample_rate, peak: int, label: str):
     """Return (snr_db, warning) for a take; warning is '' if it looks fine."""
-    level = loudest_frame_rms(band_limit(samples, sample_rate), sample_rate)
+    filtered = band_limit(samples, sample_rate)
+    warm = sample_rate * FILTER_WARMUP_MS // 1000
+    if len(filtered) > 2 * warm:
+        filtered = filtered[warm:]
+    level = loudest_frame_rms(filtered, sample_rate)
     snr = snr_db(level)
 
     if peak >= CLIP_PEAK:
@@ -508,7 +592,7 @@ def run_session(ser: serial.Serial, outdir: Path, words, reps: int, tag: str) ->
     if tag:
         print(f"condition tag: {tag}")
     print(f"{reps} reps per word, {len(words)} words: {', '.join(words)}\n")
-    print("Enter = record   s = skip this rep   n = next word   q = quit\n")
+    print("Enter = record   r = redo last take   n = next word   q = quit\n")
 
     for label in words:
         already = take_count(outdir, label)
@@ -539,8 +623,19 @@ def run_session(ser: serial.Serial, outdir: Path, words, reps: int, tag: str) ->
                 break
             if cmd == "s":
                 continue
+            if cmd == "r":
+                last = last_take_name(outdir, label)
+                if not last:
+                    print("   no take to redo yet")
+                    continue
+                remove_take(outdir, last)
+                print(f"   discarded {last} -- recording it again")
+                # fall through and capture straight into the freed slot
 
-            path, peak, n, sr, samples = do_capture(ser, outdir, label)
+            result = do_capture(ser, outdir, label)
+            if result is None:
+                continue
+            path, peak, n, sr, samples, mic_gain = result
             snr, note = quality_note(samples, sr, peak, label)
             append_manifest(outdir, {
                 "file": path.name,
@@ -550,6 +645,7 @@ def run_session(ser: serial.Serial, outdir: Path, words, reps: int, tag: str) ->
                 "duration_ms": round(1000 * n / sr),
                 "raw_peak": peak,
                 "inband_snr_db": round(snr, 1),
+                "mic_gain": mic_gain if mic_gain is not None else "",
                 "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
             })
             status = f"   {path.name}  {snr:4.0f} dB in-band  (raw peak {peak})"

@@ -52,24 +52,44 @@ const int CHANNELS = 1;
 // incantations get spoken with the wand at arm's length and the mic
 // pointed away, so the hardware 0 dB point is the floor to start from.
 //
-// 40 (0 dB) is the bench-chosen value (2026-08-22): at arm's length it puts
-// speech at p90 ~2500 with ~22 dB of headroom before clipping. An earlier
-// session ran at 50 (+5 dB) and was walked back, because this gain is
-// DIGITAL, applied after the mic's bitstream is decimated: it scales signal
-// and noise by the same factor and cannot improve SNR, so among values that
-// don't clip, the lower one buys headroom for free. Note that no value in
-// the register's range clips speech at this distance -- reaching full scale
-// from p90 ~2500 needs +22 dB and the register stops at +20 -- so there is
-// nothing to find by sweeping the gain. Levels at any other gain are just
-// these numbers times 10^(dB/20).
+// This gain is DIGITAL, applied after the mic's bitstream is decimated: it
+// scales signal and noise by the same factor and cannot improve SNR. So among
+// values that don't clip, the LOWER one is strictly better -- it buys headroom
+// for free. Levels at any other gain are just these numbers times 10^(dB/20).
 //
-// Re-run `capture_audio.py <port> calibrate` after any change to this
-// value: it emits the matching level thresholds, which are keyed to the
-// noise floor and go stale when the gain moves. A change of ROOM does not
-// require a re-run -- two runs in the same room with the fan and door
-// deliberately changed moved the floor by well under a dB, because it is
-// the mic's self-noise being measured, not the room.
-const int MIC_GAIN = 40;
+// 28 (-6 dB) since 2026-08-23. It was 40 (0 dB) before that, and the reason it
+// moved is worth understanding, because the old value was not wrong when it was
+// chosen -- the PHYSICS CHANGED UNDER IT.
+//
+// The 2026-08-22 measurements that justified 40 were taken with the board
+// attached to the wand by tape, loosely. Peak raw amplitude on the zigzag (the
+// most violent gesture) came in at 14225-17826, leaving 5-7 dB of headroom.
+// On 2026-08-23 the board was remounted rigidly -- bedded on putty under two
+// rubber bands -- because the tape was crackling into the mic and the board was
+// shifting. A rigid mount transmits wand vibration into the board FAR better
+// than a loose one: the identical gesture at the identical gain then measured
+// 29776-30138, i.e. ~5 dB higher, at 91-92% of the int16 ceiling. Nothing
+// actually saturated, but the margin was 0.7 dB.
+//
+// That is not a margin to record a training set against, and it will only get
+// tighter: the finished wand is hot-glued and epoxied into the bore, which is
+// at least as rigid as putty and rubber bands. So the rigid-mount number is the
+// REAL coupling and the loose-mount number was the outlier.
+//
+// -6 dB puts that same worst-case cast at ~15100, restoring ~6.7 dB of margin.
+// It costs nothing: in-band SNR is unchanged by construction, and the in-band
+// noise floor lands around 4.4 counts RMS, still ~24 dB above the int16
+// quantisation floor, so no detail is lost in the bottom bits.
+//
+// Clipping is the asymmetric risk here and that is why the trade is worth it.
+// Saturation hits the SUMMED waveform, so it destroys the speech along with the
+// rumble that caused it, and no filter downstream can separate them again --
+// whereas 6 dB of unused headroom costs literally nothing.
+//
+// Re-run `capture_audio.py <port> calibrate` after any change to this value:
+// it emits the matching level thresholds, which are keyed to the noise floor
+// and go stale when the gain moves.
+const int MIC_GAIN = 28;
 // This is a SAFETY CEILING, not the intended take length. The host ends a
 // capture with 's' when the operator says they're done, mirroring the cast
 // button's press/release -- see tools/capture_audio.py.
@@ -228,12 +248,20 @@ void loop()
     size_t n = captureCount;
     NVIC_EnableIRQ(PDM_IRQn);
 
+    // Gain is in the header so the host records it per take rather than
+    // trusting a flag the operator has to keep in sync by hand. A set recorded
+    // across a gain change is still fully recoverable -- the gain is a pure
+    // multiply, so takes at two gains differ by an exactly invertible scalar --
+    // but ONLY if the value in force is written down at capture time. It is not
+    // recoverable from the audio afterwards.
     Serial.print("CAPTURE,");
     Serial.print(n);
     Serial.print(',');
     Serial.print(SAMPLE_RATE_HZ);
     Serial.print(',');
-    Serial.println(CHANNELS);
+    Serial.print(CHANNELS);
+    Serial.print(',');
+    Serial.println(MIC_GAIN);
     // Dump in small chunks, flushing each, rather than one big
     // Serial.write(). A single 96 KB write stalls permanently at ~30 KB on
     // this core's USB-CDC: the host receives 30,208 bytes at 14.7 KB/s and
