@@ -398,13 +398,16 @@ smart-wand/
 │   ├── ButtonTest/ButtonTest.ino # debounced press/release over serial — bench-verified 2026-08-16
 │   ├── BatteryTest/BatteryTest.ino
 │   ├── MicTest/MicTest.ino
+│   ├── SelfTest/SelfTest.ino     # hardware health check — IMU/mic/battery/LED/pins
 │   ├── traces/                   # labelled IMU CSVs, per date_speaker
 │   └── traces_audio/             # labelled incantation WAVs, per date_speaker_tag
 │                                 #   each dir also holds takes.csv (label, tag,
 │                                 #   duration, peak, in-band SNR per take)
 └── tools/                        # host-side capture scripts, run on the laptop
     ├── capture_traces.py         # serial → labelled CSV, Edge Impulse ingestible
-    └── capture_audio.py          # raw PDM stream → per-utterance WAV
+    ├── capture_audio.py          # raw PDM stream → per-utterance WAV
+    └── read_serial.py            # print serial lines; substitute for `arduino-cli
+                                  #   monitor`, which needs a TTY (see Board gotchas)
 ```
 
 `tools/` is plain Python on the host, not on the wand. It exists because the C++-only decision
