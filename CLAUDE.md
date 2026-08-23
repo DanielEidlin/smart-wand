@@ -430,13 +430,15 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    keypress-triggered fixed 2 s recording window, binary PCM dump over serial) is written and
    bench-verified (2026-08-22): compiles clean (44,528 B flash / 5%, 71,748 B RAM / 30% — the
    64 KB capture buffer is most of that), live `LEVEL,...` output visibly reactive to bench noise
-   — `MIC_GAIN` is **40** (the hardware 0 dB point), settled on the bench 2026-08-22 after a run
-   at 50 (+5 dB) was walked back. At arm's length gain 40 puts speech at raw peak ~1500-2600 with
-   over 20 dB of headroom. **The PDM gain is digital**, applied after decimation, so it scales
-   signal and noise together and cannot improve SNR. **Don't sweep the gain looking for a better
-   value** — it is a pure multiply, so a single `calibrate` run predicts every other gain
-   arithmetically (`level × 10^(dB/20)`, 0.5 dB per register step), and no value in the
-   register's range can even clip speech from here.
+   — `MIC_GAIN` is **28** (−6 dB) as of 2026-08-23; it was 40 (the hardware 0 dB point) before
+   that, and the reason it moved is **mount rigidity**, see the headroom section below.
+   **The PDM gain is digital**, applied after decimation, so it scales signal and noise together
+   and cannot improve SNR. **Don't sweep the gain looking for a better value** — it is a pure
+   multiply, so a single `calibrate` run predicts every other gain arithmetically
+   (`level × 10^(dB/20)`, 0.5 dB per register step). Because it is a pure multiply, a set
+   recorded across a gain change is also **exactly reconcilable** rather than ruined — but only
+   if the gain in force is written down per take, which is why `MicTest` now emits it in the
+   `CAPTURE` header and `capture_audio.py` records it in `takes.csv`.
 
    **Measure audio levels BAND-LIMITED to 300-3400 Hz. Raw sample amplitude on this mic measures
    something else entirely** (established 2026-08-22 from six diagnostic takes at arm's length,
@@ -480,8 +482,30 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    windows, so without gating it silently measures how much of the window you spent *talking*
    rather than how *loudly* — that artifact alone drifted three runs 4.5 dB apart).
 
-   **Motion is what sets the headroom budget, and it locks MIC_GAIN at 40** (measured
-   2026-08-22, board handheld at arm's length, word spoken while performing the gesture):
+   **Motion sets the headroom budget — and HOW THE BOARD IS MOUNTED sets how much motion
+   reaches the mic.** This is the single most surprising thing found in the audio bring-up, and
+   it invalidated a gain choice that had looked settled. The table below was measured
+   2026-08-22 with the board taped **loosely** to the wand. On 2026-08-23 the board was
+   remounted **rigidly** (bedded on putty under two rubber bands, because the tape was crackling
+   into the mic and the board was shifting), and the identical zigzag at the identical gain then
+   measured **29776-30138 raw — 91-92% of the int16 ceiling, 0.7 dB of margin**, against the
+   14225-17826 below. A rigid mount transmits wand vibration into the board far better than a
+   loose one; roughly **+5 dB** here.
+
+   **`MIC_GAIN` was therefore lowered 40 → 28 (−6 dB)**, restoring ~6.7 dB of margin. It cost
+   nothing measurable: the same cast scored 52.6-53.4 dB in-band SNR at gain 28 against
+   53.7-56.4 dB at gain 40, i.e. unchanged within delivery variation, exactly as a pure digital
+   multiply must be. The in-band noise floor simply halved, 8.8 → 4.4 counts, still ~24 dB above
+   the int16 quantisation floor.
+
+   **The rigid number is the real one, and the finished wand will be more rigid still** — the
+   board gets hot-glued and epoxied into the bore. Whether that pushes transmitted vibration up
+   further (stiffer coupling) or down (potting adds mass and polymer damping) is genuinely
+   uncertain, so **re-measure headroom on the assembled wand rather than predicting it**. If a
+   cast clips there, lower `MIC_GAIN` again; never raise it.
+
+   Original loose-mount measurements (2026-08-22, `MIC_GAIN=40`, board handheld at arm's
+   length, word spoken while performing the gesture):
 
    | condition | raw peak | LF (<300 Hz) RMS | in-band noise | word SNR | headroom |
    | --- | --- | --- | --- | --- | --- |
@@ -492,12 +516,12 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    Swinging the wand multiplies sub-300 Hz energy by ~30x and the raw peak by ~9x. The zigzag is
    3.6x worse than the thrust — consistent with it having the highest peak gyro of any gesture
    (1188 vs 679 deg/s, see **Why these five gestures separate**), and it is *sustained*, so violent
-   motion overlaps the whole utterance instead of trailing one jab. **Nothing clipped at gain 40,
-   but at gain 50 that same cast computes to ~31,700 against a 32,767 ceiling — it would clip.**
-   Clipping would destroy the *speech*, not just the rumble, because saturation hits the summed
-   waveform before any filter can separate them. So: **never raise MIC_GAIN above 40**; if a
-   future cast ever clips, lower it. This is also why the clipping check in `capture_audio.py` is
-   deliberately broadband while every level check is band-limited.
+   motion overlaps the whole utterance instead of trailing one jab. Clipping destroys the
+   *speech*, not just the rumble, because saturation hits the summed waveform before any filter
+   can separate them — which is the asymmetry that justifies giving up headroom cheaply. So:
+   **never raise MIC_GAIN; if a future cast ever clips, lower it.** This is also why the
+   clipping check in `capture_audio.py` is deliberately broadband while every level check is
+   band-limited.
 
    **In-band SNR is unharmed by motion** — it measured *higher* while casting (54 dB vs 43 dB
    still), because people naturally project when performing the gesture. Motion raises the
@@ -539,6 +563,22 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
 3. **Assembly** — solder 30 AWG to castellated pads, heat shrink every joint, epoxy the LED
    into the tip as a diffuser, hot-glue the stack into the 20 mm bore. Keep the USB-C port,
    switch lever, and cast button accessible.
+
+   **Do not let epoxy or hot glue touch the PDM mic's acoustic port.** The MEMS mic breathes
+   through a small hole in its package; occluding it deafens the mic, and it is unrecoverable
+   once cured. Mask the mic before potting.
+
+   **Plan an acoustic port hole in the shell, at the same time as the button hole** (both are
+   pre-epoxy decisions, see step 1). Sealing a mic inside an enclosure and porting it through a
+   small hole is the standard approach — every phone does it — and the rule that makes it work
+   is to **minimise the cavity between the mic package and the hole**. A large trapped volume
+   plus a small hole is a Helmholtz resonator and will colour the speech band; the mic sitting
+   nearly flush against the shell with a short 1-2 mm hole stays flat well past 4 kHz. Mounting
+   the board *outside* the wand was considered as a fallback if this proves bad — it would match
+   the training data exactly, since that was all recorded in open air — but it costs the whole
+   look of the thing and exposes the board to the swings, so try the port first. **This is
+   testable before anything is glued:** put the board in the bore with a port hole, record a few
+   takes, and compare against open air.
 4. **Incantations (deferred)** — button-gated keyword spotting on the PDM mic. See below.
 
 Phase 1 exists to gather calibration data. Don't write gesture-classification logic before
@@ -557,13 +597,17 @@ The project's ML budget belongs to Phase 4 keyword spotting, where no heuristic 
 
 ## Incantation recording plan (Phase 1, IN PROGRESS — resume here)
 
-Audio bring-up is **complete and proven** (2026-08-22): gain locked, levels understood,
-tooling debugged, two silent data-corruption bugs found and fixed. What remains is simply
-recording the labelled set. **This is real training data, not a bench test.**
+Audio bring-up is **complete and proven**. **This is real training data, not a bench test.**
 
-**State:** 5 takes of `lumos` recorded in `bringup/traces_audio/2026-08-22_daniel_normal/`
-(a deliberate pilot, verified take by take before committing to the rest). Everything else
-below is still to do.
+**State (2026-08-23): Daniel's set is DONE — 260 takes**, in
+`bringup/traces_audio/2026-08-23_daniel_<tag>/`. 40 takes each of the five spell words and of
+`silence`, 20 of `other`, across five conditions (`normal`, `gesture`, `quiet`, `fast`,
+`still`). Nothing clipped in 260 takes. **Next: repeat every batch with `--speaker alise`.**
+
+Two directories under `traces_audio/` are deliberately **not** training data and are named
+with a leading underscore so they don't collide with the session tool's directory scheme:
+`_superseded_2026-08-22_pilot/` and `_compare_gesture_silence_loosemount/`. Each has a README
+explaining why. Don't fold them back in without reading those.
 
 **How a take works now.** The operator starts AND stops each take — Enter, perform, Enter —
 mirroring the cast button's press/release. There is no fixed recording window, deliberately;
@@ -576,23 +620,36 @@ hunted for. `--tag` names the condition: it becomes part of the directory name A
 `takes.csv`, which also records duration, raw peak and in-band SNR per take. The condition is
 not recoverable from the audio afterwards, so it has to be written at capture time.
 
-```bash
-SPELLS="lumos nox expelliarmus avada_kedavra expecto_patronum"
-P=/dev/cu.usbmodem101
+The six batches actually recorded, in order. `S` is the five spell words; the port is `COM5`
+on this Windows machine (`arduino-cli board list` to confirm — Windows keys the COM number to
+the device, so it survives replugging into a different physical port).
 
-python3 tools/capture_audio.py $P session --speaker daniel --tag normal  --words $SPELLS --reps 20
-python3 tools/capture_audio.py $P session --speaker daniel --tag gesture --words $SPELLS --reps 10
-python3 tools/capture_audio.py $P session --speaker daniel --tag quiet   --words $SPELLS --reps 5
-python3 tools/capture_audio.py $P session --speaker daniel --tag loud    --words $SPELLS --reps 5
-python3 tools/capture_audio.py $P session --speaker daniel --tag fast    --words $SPELLS --reps 5
-python3 tools/capture_audio.py $P session --speaker daniel --tag still   --words silence other --reps 20
-python3 tools/capture_audio.py $P session --speaker daniel --tag gesture --words silence --reps 20
+```bash
+S="lumos nox expelliarmus avada_kedavra expecto_patronum"
+
+python tools/capture_audio.py COM5 session --speaker NAME --tag normal  --words $S --reps 20
+python tools/capture_audio.py COM5 session --speaker NAME --tag gesture --words $S --reps 10
+python tools/capture_audio.py COM5 session --speaker NAME --tag quiet   --words $S --reps 5
+python tools/capture_audio.py COM5 session --speaker NAME --tag fast    --words $S --reps 5
+python tools/capture_audio.py COM5 session --speaker NAME --tag still   --words silence other --reps 20
+python tools/capture_audio.py COM5 session --speaker NAME --tag gesture --words silence --reps 20
 ```
 
+**There is no `loud`/`dramatic` batch, deliberately.** The original plan had one, but the
+`gesture` batch is performed at full theatrical delivery — casting with the wand *is*
+theatrical, and nobody says "Lumos" loudly and flatly — so it already occupies that end of the
+range and a separate batch would duplicate it. Measured spread bears this out: `quiet` lands
+~20 dB in-band, `normal` ~25 dB, `gesture` 39-53 dB. The clipping rationale for a `loud` batch
+is also gone: standing still peaks at 9% of full scale, so voice alone cannot approach the
+ceiling from here — **motion** is the clipping risk, and `gesture` covers it.
+
 Every run is independently resumable (progress is counted from files on disk, never from a
-counter), so `q` out any time and rerun the same line. `n` skips to the next word. A run walks
-the word list in order — all reps of one word, then the next — so a single word per invocation
-is also fine and easier on the voice.
+counter), so `q` out any time and rerun the same line. `n` skips to the next word, `r` redoes
+the take you just recorded. A run walks the word list in order — all reps of one word, then the
+next — so a single word per invocation is also fine and easier on the voice.
+
+**Pilot every new speaker with 5 takes before they commit to 260.** It caught a 16 dB room-noise
+problem on Daniel's first attempt. Worth it.
 
 **Things that will otherwise surprise whoever resumes this:**
 
@@ -600,15 +657,37 @@ is also fine and easier on the voice.
   `gesture`+`silence` batch (casting with no words at all) covers the single most common real
   input: incantations are *per-spell optional*, so the model must confidently produce nothing
   for a gesture-only cast. Nothing else in the set teaches that.
-- **The `quiet` batch will trip the "only N dB in-band" warning. Do not redo those takes** —
-  the audio is supposed to be quiet, and the flag is the threshold working, not a failure.
-- **Never change `MIC_GAIN` mid-set.** It is locked at 40 by the clipping evidence above; a
-  change also makes takes recorded before and after mutually inconsistent.
-- **Second speaker.** Repeat every batch with `--speaker yuval`, matching the gesture traces,
-  which already have two people.
-- **Repo size.** Raw audio is committed alongside the IMU CSVs (same convention). The pilot is
-  224 KB; a full two-speaker set lands around 25-30 MB. Fine for git, but worth a deliberate
-  decision (git-lfs, or excluding audio) before pushing the whole thing.
+- **The `gesture`+`silence` batch will trip "not silent, redo" on every take. Ignore it.** That
+  threshold is calibrated on standing-still room tone, and motion noise legitimately exceeds it.
+  Only ever act on `CLIPPED`. Same applies to low-level flags on the `quiet` batch: the audio is
+  *supposed* to be quiet.
+- **But a quiet take can still be genuinely bad, and the SNR number alone won't tell you.**
+  Long words spoken softly decay across syllables until most of the word sits under the floor —
+  a quiet `expelliarmus` measured 12.8 dB with only 100-140 ms of a ~1 s utterance actually
+  above room tone. That is not quiet speech, it is a mostly-missing word, and it actively
+  conflicts with the `silence` class it comes to resemble. The diagnostic that catches it is
+  **voiced duration**, not level. Cue for the retake: *quiet but crisp* — keep the last syllable
+  as strong as the first.
+- **`MIC_GAIN` may change mid-set, and that is recoverable — but only because it is recorded.**
+  Daniel's `normal` batch is at gain 40 and everything after at 28. Since the gain is a pure
+  multiply, the two differ by an exactly invertible scalar. This only works because the gain is
+  captured per take in `takes.csv`; before 2026-08-23 it wasn't, and a change would have been
+  unrecoverable. Don't change it casually, but don't panic if it must move.
+- **Second speaker is Alise, not Yuval** (2026-08-23). Deliberately a female voice: formants sit
+  ~15-20% higher from a shorter vocal tract, and since MFCCs encode the spectral envelope that
+  shift moves the model's inputs directly. A second male voice would add far less. Both
+  fundamentals (male ~85-155 Hz, female ~165-255 Hz) sit *below* the 300 Hz band-pass either
+  way, so it is the formants and harmonic spacing that differ in band, not the pitch itself.
+  Adding Yuval as a third is still worthwhile if he's willing.
+- **Repo size: resolved.** Audio is tracked with **git-lfs** (`*.wav` in `.gitattributes`).
+  Daniel's set alone is 18 MB, so two speakers land near 36 MB — above the 25-30 MB originally
+  estimated.
+- **This whole set is provisional with respect to the FINAL acoustics.** Every take was recorded
+  with a bare board in open air. In the finished wand the mic is sealed inside a 20 mm bore,
+  which changes the speech channel itself — high-frequency rolloff plus cavity resonance — not
+  just the noise. Most of the set's value transfers regardless (vocabulary, delivery range,
+  speaker variation, the near-miss boundary in `other`), but **expect to fine-tune on a smaller
+  set recorded through the assembled wand** rather than shipping a model trained purely on this.
 
 ## Designing for voice (Phase 4, deferred)
 
