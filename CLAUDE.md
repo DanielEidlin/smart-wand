@@ -12,6 +12,53 @@ a reply** — parts, protocols, register/pin concepts, electrical units, fabrica
 (e.g. "ODR (output data rate — how many samples per second the sensor produces)"). Do not
 explain general programming terms; those land as condescending.
 
+## Where we left off (2026-10-09) — read this first
+
+Open threads, most blocking first. Details live in the sections linked; this is the index.
+
+1. **A test wand to mount the board on — BLOCKS the gesture capture.** With header pins
+   soldered, the XIAO can't be rubber-banded to the toy wand firmly, and the jumper/alligator
+   leads to the button are too unstable to swing (a lead dropping out mid-cast splits one
+   gesture into fragments, see **Roadmap** step 2).
+   - **Plan:** 3D-print a split-shell wand. A friend has a **Bambu Lab** printer, so print
+     iterations go through him and are slow: get fits right first time.
+   - **Candidate:** MakerWorld model 1429025, "Harry Potter Wand (Hermione Remote Control)".
+     It's a half-shell with a lid, so the layout is right, but its handle bay is built for a
+     small 433 MHz remote board. From a photo, the bay is estimated at ~13 mm wide (not
+     measured). MakerWorld blocks automated fetching, so its page can't be read from here.
+   - **Waiting on:** the friend measuring the bay in Bambu Studio. He was sent the request
+     (2026-10-09). The bay must reach, inside, with the lid closed: **width >= 18.5 mm**
+     (board 17.5 mm), **depth >= 12 mm** (**XIAO with pins measured 11 mm thick**, pin tips
+     to tallest component), **length >= 23 mm** (board 21 mm).
+     Proposed fix: scale the two short axes ~140% with uniform scaling off and length at 100%,
+     with shell and lid scaled identically. Depth is the likeliest to fall short; if so, scale
+     that axis further than width.
+   - **Button for the test wand: the basic 6x6 mm tactile switch**, in the model's own button
+     pocket, which goes ~8.4 mm when scaled (fix the looseness with Blu-Tack). The panel-mount
+     button is kept for the final build, where its lugs get soldered.
+   - **Fallback:** if the scaled model doesn't work, design a custom split-shell holder in
+     OpenSCAD (not installed here; ask before `winget install OpenSCAD.OpenSCAD`): handle bay
+     with pin slots, strap across the USB-C shell (not over the IMU/mic), button near the top
+     of the grip, wire channels, chopstick/dowel socket at the tip. Another candidate seen:
+     the Arduino Nano 33 BLE magic wand case on Thingiverse (user "eoinedge"); its pocket is
+     ~18 mm wide but ~45 mm long, and nobody has checked whether it clears header pins.
+2. **Then: button-gated gesture capture.** `python tools/capture_traces.py COM5 --speaker
+   daniel` (10 casts per gesture plus `idle`). Mount it **USB-C toward the handle, components
+   up**. If that's flipped from the 2026-08-16 mount, the flick sign may invert, and the first
+   test flick shows it (`y1` negative should mean flick up). Then
+   `python tools/gesture_lab.py --traces bringup/traces/<new dir>`, retune thresholds there,
+   copy them to `SmartWand/config.h`, and rerun the parity test (**Roadmap** step 2).
+   `SmartWand` is currently flashed on the board; `capture_traces.py` needs `ImuTest`
+   reflashed first.
+3. **Alise's incantation recording** is unchanged: not started, see **Incantation recording
+   plan**. Pilot with 5 takes first.
+4. **Firmware work that needs no wand** (pick any): wire the WS2812B tile to `D0` and tune
+   the effects, measuring current to set `LED_MAX_BRIGHTNESS`; the latching low-voltage floor
+   (`SmartWand/power.h` is a stub); IMU FIFO + wake-on-motion + MCU sleep in IDLE.
+5. **Small unknowns:** how many lugs the panel button has and whether a mounting nut came
+   with it (asked, not answered); whether the `D1` pad is easy to solder (see **Board
+   gotchas**).
+
 ## Spells
 
 A spell is `(gesture, optional incantation)` from the first commit — the incantation field
@@ -688,7 +735,7 @@ Keep a `GestureEngine` seam that takes a sample ring buffer and returns
 gesture starts and ends — is shared by all three and is the harder half of the problem.
 The project's ML budget belongs to Phase 4 keyword spotting, where no heuristic exists.
 
-## Incantation recording plan (Phase 1, IN PROGRESS — resume here)
+## Incantation recording plan (Phase 1, IN PROGRESS)
 
 Audio bring-up is **complete and proven**. **This is real training data, not a bench test.**
 
