@@ -13,31 +13,37 @@ One window = one cast. On the wand the cast button defines the window. The
 gyro-magnitude activity with a long hangover instead -- a stand-in, not the
 real thing. Reps cut off by the start or end of a capture are skipped.
 
-The features (all computed over one window):
+The features (all computed over one window). "Pitch" is the wand tilting up
+or down, "yaw" turning side to side; both are rotation ACROSS the wand, i.e.
+the (gy, gz) components. gx is roll, twist about the wand's own length.
 
   cum     cumulative rotation, deg: sum of |gyro|*dt, counting only samples
-          above DEADBAND_DPS. Without the deadband, gyro noise and bias
-          integrate to ~100 deg over an 8 s idle hold -- and circle has no
-          upper bound on hold length.
-  planar  how single-plane the rotation is, 0..1, from the 2x2 covariance of
-          (gy, gz) -- the rotation vector's components across the wand.
-          (l1 - l2) / (l1 + l2) of its eigenvalues. Flicks and zigzag sweep
-          the vector back and forth along ONE line (~0.9-1.0); a circle
-          sweeps it around (~0.2).
-  phi     direction of that line in the y-z plane, deg. 0 = pitch (flick up/
-          down), +/-90 = yaw (side to side = zigzag). Both planar and |phi|
-          are invariant to the SIGN of rotation, which is why it doesn't
-          matter which way a zigzag starts.
-  y1      signed rotation at the first strong lobe, projected on the phi
-          axis. Flick up is negative, flick down positive (mount-specific,
-          see CLAUDE.md board-axis mapping).
-  rev     diagnostic only: count of 3D gyro-vector direction reversals
-          (successive strong lobes with negative dot product). The original
-          zigzag idea. Reported, not used -- circles score as high as zigzags.
+          above DEADBAND_DPS. Without the deadband, an 8 s still hold
+          integrates to 171 deg -- circle territory, and circle has no upper
+          bound on hold length.
+  planar  how single-line the (gy, gz) rotation vectors are, 0..1:
+          (l1 - l2) / (l1 + l2) of their 2x2 covariance's eigenvalues.
+          Flicks ~0.93-1.0, zigzag ~0.87-0.94 (the diagonal's pitch is what
+          it loses), thrust <=0.68, circle <=0.27.
+  phi     direction of that line, deg. 0 = pitch (flicks), +/-90 = yaw
+          (zigzag). Sign-invariant, so it doesn't matter which way a Z starts.
+  flips   sign changes of the (smoothed) rotation projected on the phi axis,
+          counting only strong lobes. A Z is right-left-right: 2 flips. A
+          flick's return stroke is at most 1. This is the vector-reversal
+          idea measured along the cast's own main axis rather than along raw
+          board axes, which is what made the 2026-08-16 attempt fail.
+  smooth  mean speed while moving / peak speed. A circle is sustained motion
+          (0.64-0.91), a thrust a burst (0.26-0.48). Unlike a peak-speed
+          cutoff it doesn't move when a gesture is performed faster or slower.
+  y1      signed rotation at the first strong lobe, projected on phi. Flick
+          up negative, flick down positive (mount-specific, see CLAUDE.md
+          board-axis mapping). Summing gy instead nets ~0: the return stroke
+          cancels it.
 
 Usage:
     python tools/gesture_lab.py                  # classify every rep
-    python tools/gesture_lab.py --roll-sweep     # tolerance to wand roll
+    python tools/gesture_lab.py --roll-sweep     # tolerance to wand twist
+    python tools/gesture_lab.py --stress         # steep Zs, fast circles, slow thrusts
     python tools/gesture_lab.py --traces bringup/traces/2026-08-16_yuval
 """
 
@@ -56,13 +62,17 @@ SEG_PREROLL = 15        # samples kept before the trigger (the IMU FIFO's job)
 # --- classifier thresholds (candidates for config.h) -----------------------
 DEADBAND_DPS = 75.0     # an 8 s still hold integrates to 171 deg at 30 dps (Daniel)
                         # but <=44 at 75; his slow circles stay >60 dps 99% of the time
-MIN_CUM_DEG = 55.0      # below: no gesture. 8 s idle <=44, smallest real rep ~64
-PLANAR_MIN = 0.80       # flick/zigzag 0.87-1.00; thrust <=0.68; circle <=0.27
-PLANAR_PEAK_DPS = 300.0 # a planar window must also be fast to be a flick/zig
-PHI_SPLIT_DEG = 45.0    # |phi| below: flick. above: zigzag
-CIRCLE_MAX_PEAK_DPS = 400.0   # circle peaks 127-365; thrust 420-679
-CIRCLE_MIN_CUM_DEG = 180.0    # circle 218-296 (one rev); thrust <=140 (Yuval)
-LOBE_DPS = 250.0        # "strong" for the first-lobe sign and reversal count
+MIN_CUM_DEG = 55.0      # below: no gesture. 8 s idle <=44, smallest real rep ~61
+FAST_PEAK_DPS = 300.0   # flicks and zigzags are fast; circles peak 127-365
+PHI_SPLIT_DEG = 45.0    # |phi| below: pitch (flick). above: yaw (zigzag)
+FLICK_MIN_PLANAR = 0.80 # flicks 0.93-1.00; thrust <=0.68
+ZIGZAG_MIN_PLANAR = 0.50   # loose on purpose: a steep diagonal adds pitch.
+                           # Only here to keep circles (<=0.27) out
+ZIGZAG_MIN_FLIPS = 2    # zigzag exactly 2 on every rep; everything else <=1
+CIRCLE_MIN_CUM_DEG = 180.0  # one circle 214-296; more circles only add
+CIRCLE_MIN_SMOOTH = 0.55    # circle 0.64-0.91; thrust 0.26-0.48
+LOBE_DPS = 250.0        # "strong" for the first-lobe sign and flip count
+SMOOTH_ALPHA = 0.4      # EMA weight for the flip counter's smoothing
 
 TRUTH = {"flick_up": "flick_up", "flick_down": "flick_down",
          "thrust": "thrust", "zigzag": "zigzag", "circle": "circle",
@@ -100,35 +110,33 @@ def segment(d):
     return out
 
 
-def roll(w, deg):
-    """Rotate gyro about the board x axis -- simulates the wand held twisted."""
-    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
-    return [r[:5] + [c * r[5] - s * r[6], s * r[5] + c * r[6]] for r in w]
+def project(w, phi_deg):
+    """Per-sample rotation along the phi axis, deg/s, EMA-smoothed."""
+    c, s = math.cos(math.radians(phi_deg)), math.sin(math.radians(phi_deg))
+    f, out = None, []
+    for r in w:
+        p = r[5] * c + r[6] * s
+        f = p if f is None else SMOOTH_ALPHA * p + (1 - SMOOTH_ALPHA) * f
+        out.append(f)
+    return out
 
 
-def reversals(w, alpha=0.4):
-    f, ref, n = None, None, 0
-    for s in w:
-        g = s[4:7]
-        f = g[:] if f is None else [alpha * x + (1 - alpha) * y for x, y in zip(g, f)]
-        m = mag(f)
-        if m < LOBE_DPS:
-            continue
-        if ref is None:
-            ref = f[:]
-            continue
-        cos = sum(x * y for x, y in zip(f, ref)) / (m * mag(ref))
-        if cos < -0.3:
-            n, ref = n + 1, f[:]
-        elif cos > 0.5 and m > mag(ref):
-            ref = f[:]
+def count_flips(proj):
+    last, n = 0, 0
+    for p in proj:
+        if abs(p) > LOBE_DPS:
+            sign = 1 if p > 0 else -1
+            n += bool(last and sign != last)
+            last = sign
     return n
 
 
 def features(w):
     dt = [(w[i + 1][0] - w[i][0]) / 1000 for i in range(len(w) - 1)]
     gm = [mag(s[4:7]) for s in w]
+    moving = [g for g in gm if g > DEADBAND_DPS]
     cum = sum(g * t for g, t in zip(gm, dt) if g > DEADBAND_DPS)
+    peak = max(gm)
 
     syy = sum(s[5] ** 2 for s in w)
     szz = sum(s[6] ** 2 for s in w)
@@ -136,7 +144,7 @@ def features(w):
     tr, det = syy + szz, syy * szz - syz ** 2
     l1 = tr / 2 + math.sqrt(max(0.0, tr * tr / 4 - det))
     planar = (2 * l1 - tr) / tr if tr else 0.0
-    phi = 0.5 * math.atan2(2 * syz, syy - szz)      # [-90, 90] deg, cos >= 0
+    phi = math.degrees(0.5 * math.atan2(2 * syz, syy - szz))   # [-90, 90]
 
     # first strong lobe, projected on the principal axis
     best = None
@@ -146,22 +154,56 @@ def features(w):
             best = s[4:7]
         elif best is not None and m < LOBE_DPS / 2:
             break
-    y1 = best[1] * math.cos(phi) + best[2] * math.sin(phi) if best else 0.0
+    r = math.radians(phi)
+    y1 = best[1] * math.cos(r) + best[2] * math.sin(r) if best else 0.0
 
-    return dict(dur=(w[-1][0] - w[0][0]) / 1000, peak=max(gm), cum=cum,
-                planar=planar, phi=math.degrees(phi), y1=y1, rev=reversals(w))
+    return dict(dur=(w[-1][0] - w[0][0]) / 1000, peak=peak, cum=cum,
+                planar=planar, phi=phi, y1=y1,
+                flips=count_flips(project(w, phi)),
+                smooth=(sum(moving) / len(moving)) / peak if moving else 0.0)
 
 
 def classify(f):
     if f["cum"] < MIN_CUM_DEG:
         return "none"
-    if f["planar"] >= PLANAR_MIN and f["peak"] >= PLANAR_PEAK_DPS:
-        if abs(f["phi"]) >= PHI_SPLIT_DEG:
+    if f["peak"] >= FAST_PEAK_DPS:
+        if abs(f["phi"]) >= PHI_SPLIT_DEG and f["planar"] >= ZIGZAG_MIN_PLANAR \
+                and f["flips"] >= ZIGZAG_MIN_FLIPS:
             return "zigzag"
-        return "flick_up" if f["y1"] < 0 else "flick_down"
-    if f["peak"] < CIRCLE_MAX_PEAK_DPS and f["cum"] >= CIRCLE_MIN_CUM_DEG:
+        if abs(f["phi"]) < PHI_SPLIT_DEG and f["planar"] >= FLICK_MIN_PLANAR:
+            return "flick_up" if f["y1"] < 0 else "flick_down"
+    if f["cum"] >= CIRCLE_MIN_CUM_DEG and f["smooth"] >= CIRCLE_MIN_SMOOTH:
         return "circle"
     return "thrust"
+
+
+# --- synthetic perturbations, for --roll-sweep and --stress ----------------
+
+def roll(w, deg):
+    """Rotate gyro about the board x axis -- simulates the wand held twisted."""
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return [r[:5] + [c * r[5] - s * r[6], s * r[5] + c * r[6]] for r in w]
+
+
+def steepen(w, deg):
+    """Add downward pitch to a zigzag's middle stroke, `deg` of extra tilt on
+    top of whatever the performer already put there -- simulates a taller Z."""
+    k = math.tan(math.radians(deg))
+    proj = project(w, features(w)["phi"])
+    last, stroke, out = 0, 0, []
+    for r, p in zip(w, proj):
+        if abs(p) > LOBE_DPS:
+            sign = 1 if p > 0 else -1
+            stroke += bool(last and sign != last)
+            last = sign
+        out.append(r[:5] + [r[5] + k * abs(r[6]) if stroke == 1 else r[5], r[6]])
+    return out
+
+
+def retime(w, k):
+    """Perform the same motion k times faster (k < 1: slower)."""
+    t0 = w[0][0]
+    return [[t0 + (r[0] - t0) / k] + r[1:4] + [x * k for x in r[4:7]] for r in w]
 
 
 def windows(dirs):
@@ -175,12 +217,36 @@ def windows(dirs):
                 yield d.name[11:], p.stem, w, trunc
 
 
+def stress(reps):
+    def tally(label, ws, want):
+        got = [classify(features(w)) for w in ws]
+        ok = sum(g == want for g in got)
+        wrong = sorted({g for g in got if g != want})
+        print(f"  {label:10} {ok}/{len(ws)}" + (f"  -> {', '.join(wrong)}" if wrong else ""))
+
+    zz = [w for _, g, w, _ in reps if g == "zigzag"]
+    cc = [w for _, g, w, _ in reps
+          if TRUTH[g] == "circle" and features(w)["cum"] >= CIRCLE_MIN_CUM_DEG]
+    tt = [w for _, g, w, _ in reps
+          if g == "thrust" and features(w)["cum"] >= MIN_CUM_DEG]
+    print("zigzag, diagonal steepened by extra tilt (natural tilt is 6-18 deg):")
+    for d in (0, 15, 30, 40, 45, 50, 60):
+        tally(f"+{d} deg", [steepen(w, d) for w in zz], "zigzag")
+    print("circle, performed faster:")
+    for k in (1.0, 1.5, 2.0, 3.0):
+        tally(f"x{k}", [retime(w, k) for w in cc], "circle")
+    print("thrust, performed slower:")
+    for k in (1.0, 0.75, 0.5):
+        tally(f"x{k}", [retime(w, k) for w in tt], "thrust")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traces", nargs="*", type=Path,
                     default=sorted(Path("bringup/traces").glob("*_*")))
     ap.add_argument("--roll-sweep", action="store_true")
+    ap.add_argument("--stress", action="store_true")
     args = ap.parse_args()
 
     reps = [r for r in windows(args.traces) if not r[3]]
@@ -189,11 +255,14 @@ def main():
         print("roll   correct")
         for deg in range(-60, 61, 5):
             ok = sum(classify(features(roll(w, deg))) == TRUTH[g] for _, g, w, _ in reps)
-            print(f"{deg:+4d}   {ok}/{len(reps)}" + ("" if ok == len(reps) else "  <--"))
+            print(f"{deg:+4d}   {ok}/{len(reps)}")
+        return
+    if args.stress:
+        stress(reps)
         return
 
     print(f"   {'who':6} {'gesture':11} {'got':10} {'dur':>4} {'peak':>5} {'cum':>4}"
-          f" {'planar':>6} {'phi':>6} {'y1':>5} rev")
+          f" {'planar':>6} {'phi':>6} {'flips':>5} {'smooth':>6} {'y1':>5}")
     ok = 0
     for who, g, w, _ in reps:
         f = features(w)
@@ -201,7 +270,7 @@ def main():
         ok += got == TRUTH[g]
         print(f"{'  ' if got == TRUTH[g] else 'XX'} {who:6} {g:11} {got:10} {f['dur']:4.2f}"
               f" {f['peak']:5.0f} {f['cum']:4.0f} {f['planar']:6.2f} {f['phi']:6.1f}"
-              f" {f['y1']:5.0f} {f['rev']:3d}")
+              f" {f['flips']:5d} {f['smooth']:6.2f} {f['y1']:5.0f}")
     print(f"\n{ok}/{len(reps)} correct (reps truncated by capture start/end skipped)")
 
 

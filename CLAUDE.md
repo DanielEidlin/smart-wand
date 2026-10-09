@@ -112,8 +112,8 @@ occupies a different corner of feature space, so thresholds can reach it:
 | Flick up | Short, single-axis rotation, **positive** sign, no reversals |
 | Flick down | Same axis, **negative** sign — plus lit/unlit context as a tiebreak |
 | Thrust | **Elevated linear accel** vs. that person's own flicks — *not* near-zero rotation, provisional, see finding below |
-| Zigzag | **Planar rotation at ~90 deg to the flicks' plane** — a side-to-side yaw, not a reversal count. See the 2026-10-09 analysis below |
-| Circle | **Long duration + large CUMULATIVE angular displacement** at low angular velocity, either rotation direction, no upper bound on revolutions |
+| Zigzag | **Side-to-side yaw (~90 deg from the flicks) that reverses twice** along that axis. See the 2026-10-09 analysis below |
+| Circle | **Large CUMULATIVE angular displacement + sustained (smooth) motion** rather than a burst, either rotation direction, no upper bound on revolutions |
 
 Only the two flicks share a shape, and they differ in sign. The zigzag exists specifically so
 Avada Kedavra cannot collide with the Expelliarmus thrust — the failure mode if both were
@@ -156,42 +156,59 @@ side down — kept consistent across both sessions.
   *(Superseded by the 2026-10-09 analysis below: with per-rep segmentation the 3D dot-product
   reversal count does fire on zigzag, 2 per rep — but circles score 1-2 as well, so it is not
   a discriminator on its own.)*
+- **Idle/rest is a solid, person-independent floor.** Both people's idle baseline landed around
+  1.1 g peak accel / <125°/s peak gyro, well clear of every real gesture (next-lowest was circle
+  at 196–365°/s). Safe to use as a wake/trigger threshold regardless of who's holding the wand.
 
 **Offline analysis (2026-10-09, `tools/gesture_lab.py`, same 2026-08-16 traces): a
 roll-tolerant heuristic classifies 30/33 intact reps across both people, and the three misses
-are artifacts of the stand-in segmenter, not of the rules.** Every feature is a running sum
-over one window, so it ports to the M4F as-is. Thresholds live at the top of the script and
-are the candidates for `config.h`.
+are artifacts of the stand-in segmenter (a slow circle split in two, two thrust wind-ups cut
+from their stab), not of the rules.** Every feature is a running sum over one window, so it
+ports to the M4F as-is. Thresholds live at the top of the script and are the candidates for
+`config.h`. `--stress` and `--roll-sweep` re-run the robustness checks below on any new traces.
 
-- **The zigzag is a planar side-to-side yaw**, not a sign-flipping signal. Take the 2x2
-  covariance of `(gy, gz)` (the rotation-vector components across the wand) over the window.
-  Its eigenvalue spread is the **planarity** (flicks 0.93-1.00, zigzag 0.87-0.94, thrust
-  0.15-0.68, circle 0.15-0.27), and its principal direction is **phi** (flicks -8..+19 deg,
-  zigzag +/-86-88 deg). This is the vector idea refined: rather than asking "did the vector
-  flip", it asks "what line do all the vectors in this cast lie along". Both measures ignore
-  rotation sign, so it doesn't matter which way the Z starts.
-- **Decision order:** cumulative rotation < 55 deg means no gesture; planar and fast means a
-  flick (|phi| < 45) or a zigzag (|phi| >= 45); otherwise peak < 400 deg/s with cum >= 180 deg
-  means circle; anything else is thrust. Flick sign comes from the **first strong lobe**
-  projected on phi. Integrated `gy` nets to ~0, because every flick's return stroke cancels it.
+- **The zigzag is a side-to-side yaw that reverses twice.** Treat `(gy, gz)` (the rotation
+  components across the wand: pitch is tilting up/down, yaw turning side to side) as a vector
+  per sample. Over the window, the principal direction of those vectors is **phi**: flicks
+  -8..+19 deg (pitch), zigzag +/-86-88 deg (yaw). Project the smoothed rotation onto that axis
+  and count sign changes between strong lobes: **every zigzag flips exactly 2 times** (right,
+  left, right); everything else at most 1 (a flick's return stroke). Rule: |phi| >= 45 and
+  flips >= 2 and planarity >= 0.5. This is the vector-reversal idea from the 2026-08-16 bullet
+  above, measured along the cast's own main axis instead of raw board axes.
+- **Why not planarity alone (tried first, rejected):** the eigenvalue spread of the `(gy, gz)`
+  covariance (flicks 0.93-1.00, zigzag 0.87-0.94) separates the recorded Zs, but only because
+  both people drew wide, flat ones: each stroke's direction measured 1-18 deg off pure yaw. A
+  taller Z puts pitch into the diagonal, and with a 0.80 planarity cutoff the classifier failed
+  from just +15 deg of extra diagonal tilt (synthetic, `--stress`). The flip rule holds to
+  +45 deg of extra tilt. Planarity stays in the zigzag rule only at 0.5, to keep circles
+  (<= 0.27) out.
+- **Circle vs thrust is decided by smoothness, not peak speed.** Smoothness = mean speed while
+  moving / peak speed: circles 0.64-0.91 (sustained), thrusts 0.26-0.48 (a burst). The first
+  version used peak < 400 deg/s, which sat in a 55 deg/s gap for Yuval (circle 365, thrust 420)
+  and failed on circles performed just 1.25x faster. Smoothness is a ratio, so performing faster
+  or slower doesn't move it; synthetic circles at 3x speed still classify. Circle also needs
+  cum >= 180 deg (one circle 214-296; more circles only add).
+- **Decision order:** cum < 55 deg -> none; fast (peak >= 300) and the zigzag rule -> zigzag;
+  fast, |phi| < 45 and planarity >= 0.8 -> flick; cum >= 180 and smooth >= 0.55 -> circle; else
+  thrust. Flick sign comes from the **first strong lobe** projected on phi. Integrated `gy` nets
+  to ~0, because every flick's return stroke cancels it.
 - **The cumulative-rotation integral needs a 75 deg/s deadband.** At 30, an 8 s still hold
   integrates to 171 deg (Daniel), which is circle territory. At 75 it reads <= 44, while
   Daniel's very slow circles (peak only 170-196 deg/s) stay above 60 deg/s for 99% of their
   samples and lose almost nothing. This matters because circle has no upper bound on hold time.
-- **Roll tolerance: accuracy holds flat from -35 to +25 deg of wand twist** (`--roll-sweep`
-  rotates the gyro about the board's x axis). It's asymmetric because Yuval already holds the
-  wand ~15 deg twisted relative to Daniel. If the final grip proves looser than that, de-roll
-  using the accelerometer's gravity vector at button-press time. The button itself may fix
-  most of it, since the thumb lands on it at a fixed roll.
-- **Weakest pairs, by margin:** circle vs thrust on peak gyro (Yuval 365 vs 420 deg/s, though
-  cum adds a second margin of 218 vs 140), and planarity at the thrust/flick boundary (0.68 vs
-  0.87).
+- **Roll tolerance: accuracy holds flat from -35 to +25 deg of wand twist** (twist about the
+  wand's own length, board x; `--roll-sweep` simulates it). It's asymmetric because Yuval
+  already holds the wand ~15 deg twisted relative to Daniel (his flicks sit at phi +12..+19).
+  If the final grip proves looser than that, de-roll using the accelerometer's gravity vector at
+  button-press time. The button itself may fix most of it, since the thumb lands on it at a
+  fixed roll.
+- **Known soft spots:** planarity at the thrust/flick boundary (0.68 vs 0.80 cutoff, nearest
+  flick 0.93); and the 55 deg "no gesture" floor, which Yuval's smallest thrust (cum 61) clears
+  by little, and fails when performed slower (`--stress`).
 - **Caveat that outweighs the result: ~3-4 reps per gesture per person, captured WITHOUT the
-  button.** Pressing a button while gesturing may change the motion itself. The next IMU capture
-  should be button-gated, one window per press, which also replaces the segmenter.
-- **Idle/rest is a solid, person-independent floor.** Both people's idle baseline landed around
-  1.1 g peak accel / <125°/s peak gyro, well clear of every real gesture (next-lowest was circle
-  at 196–365°/s). Safe to use as a wake/trigger threshold regardless of who's holding the wand.
+  button**, and the stress tests are synthetic edits of those same reps. Pressing a button while
+  gesturing may change the motion itself. The next IMU capture should be button-gated, one
+  window per press, which also replaces the segmenter.
 
 Raw labelled traces: six CSVs per person (`flick_up`, `flick_down`, `thrust`, `zigzag`, `circle`
 or `circle_ccw`, `idle`), one row per sample at 104 Hz, format `millis,label,ax,ay,az,gx,gy,gz`
