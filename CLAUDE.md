@@ -222,7 +222,7 @@ or `circle_ccw`, `idle`), one row per sample at 104 Hz, format `millis,label,ax,
 | IMU | LSM6DS3TR-C (onboard) | 6-axis accel + gyro, gesture source |
 | Mic | PDM MEMS (onboard) | Unused until Phase 4 (incantations). Keep its pins and power budget reserved. |
 | Tip LED | WS2812B Mini RGB board | 10 mm round tile, single addressable pixel |
-| Cast button | Momentary metal panel-mount switch — **candidate found, not yet ordered** | Held during a cast; gates the mic in Phase 4. AliExpress listing (2026-08-15): "8mm Buttons Metal Power On Off Push Button Mini Switch Momentary Self-reset ... Waterproof", ~₪4/$1.15, 4.8★/29 reviews/500+ sold. Confirmed momentary (not latching — verify this on any alternate listing, the two look identical in photos). Dimensions from listing photo: Φ7.8 mm thread, Φ11.8 mm shoulder, Φ7.9 mm cap, 5.8 mm thread length, 15.5 mm total incl. legs. **Verify a mounting nut is included before ordering** — not visible in listing photos. |
+| Cast button | Momentary metal panel-mount switch — **in hand and bench-verified (2026-10-09)** | Held during a cast; gates the mic in Phase 4. AliExpress listing (2026-08-15): "8mm Buttons Metal Power On Off Push Button Mini Switch Momentary Self-reset ... Waterproof", ~₪4/$1.15, 4.8★/29 reviews/500+ sold. Confirmed momentary (not latching — verify this on any alternate listing, the two look identical in photos). Dimensions from listing photo: Φ7.8 mm thread, Φ11.8 mm shoulder, Φ7.9 mm cap, 5.8 mm thread length, 15.5 mm total incl. legs. Whether a mounting nut came with it is not yet recorded. Bench check via `ImuTest` on `D1`/`GND` (2026-10-09): 5/5 presses, holds 84-3717 ms, zero bounce or spurious edges, release registered every time (blue LED tracked it), so this unit is truly momentary. Legs are flat solder lugs, so bench wiring without solder is by mini alligator clips onto the lugs, not Dupont jumpers. |
 | Battery | 14500 Li-ion 3.7 V 1000 mAh | In a 1-slot AA/14500 holder (no direct soldering to cell) |
 | Switch | SS12D00 1P2T slide | Breaks the battery line into BAT+ |
 | Consumables | 30 AWG silicone wire, heat shrink, epoxy, hot glue | 20 mm wand bore — no pin headers fit |
@@ -457,7 +457,7 @@ smart-wand/
 │                                 #   each dir also holds takes.csv (label, tag,
 │                                 #   duration, peak, in-band SNR per take)
 └── tools/                        # host-side capture scripts, run on the laptop
-    ├── capture_traces.py         # serial → labelled CSV, Edge Impulse ingestible
+    ├── capture_traces.py         # guided button-gated IMU capture → one CSV per gesture
     ├── capture_audio.py          # raw PDM stream → per-utterance WAV
     ├── gesture_lab.py            # offline reference classifier over bringup/traces/
     └── read_serial.py            # print serial lines; substitute for `arduino-cli
@@ -608,6 +608,16 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    `ARDUINO_NRF52_ADAFRUIT`, which `platform.txt` defines for every board in this core, XIAO Sense
    included, despite the library's own header comment claiming Adafruit-board-only) — not a
    separately managed library, so it won't show up in `arduino-cli lib list`.
+   **`ImuTest` is now button-gated (2026-10-09, bench-verified with the real button: cast column
+   numbered 1-5 cleanly, 9.61 ms sample period, max 10 ms, no dropped samples):** each row
+   gains a `cast` column, 0 while released and the press number while the button on `D1` is
+   held, so one cast = one window with no segmentation heuristic. `tools/capture_traces.py`
+   drives a guided session (hold, perform, release; N casts per gesture, resumable) and prints
+   what `gesture_lab.py` classifies each cast as. Its `idle` gesture means pressing the button
+   *without* gesturing, which the classifier must reject. Run with:
+   `python tools/capture_traces.py COM5 --speaker NAME` (default 10 casts each).
+   This is the capture the 2026-10-09 classifier is waiting on: real button-gated casts, so
+   the thresholds stop resting on ~3-4 unbuttoned reps per person.
    `bringup/ImuTest/ImuTest.ino` (104 Hz accel+gyro CSV, keypress-tagged labelling) is written
    and bench-verified (2026-08-16): clean sampling (9.6 ms avg period, zero dropped samples) and
    correct label tagging confirmed. Used for two full labelled-gesture sessions so far, board

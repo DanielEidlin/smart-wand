@@ -8,10 +8,12 @@ recorded traces, then ported to SmartWand/config.h -- so it is deliberately
 dependency-free and written the way the firmware will have to compute it:
 running sums over one window, no FFTs, no matrices beyond 2x2.
 
-One window = one cast. On the wand the cast button defines the window. The
-2026-08-16 traces predate the button, so each file is split into reps by
-gyro-magnitude activity with a long hangover instead -- a stand-in, not the
-real thing. Reps cut off by the start or end of a capture are skipped.
+One window = one cast. Traces with a non-zero `cast` column (ImuTest with the
+cast button, 2026-10-09 on) are split one window per press, exactly as the
+wand will see them. The 2026-08-16 traces predate the button, so they are
+split into reps by gyro-magnitude activity with a long hangover instead -- a
+stand-in, not the real thing. Windows cut off by the start or end of a
+capture are skipped.
 
 The features (all computed over one window). "Pitch" is the wand tilting up
 or down, "yaw" turning side to side; both are rotation ACROSS the wand, i.e.
@@ -80,9 +82,28 @@ TRUTH = {"flick_up": "flick_up", "flick_down": "flick_down",
 
 
 def load(path):
+    """Rows of [millis, ax, ay, az, gx, gy, gz, cast]. cast is the button
+    press number (0 = released); traces from before the button read 0."""
     with open(path, newline="") as f:
         return [[float(r[k]) for k in ("millis", "ax", "ay", "az", "gx", "gy", "gz")]
+                + [int(r.get("cast") or 0)]
                 for r in csv.DictReader(f)]
+
+
+def casts(d):
+    """Split a button-gated capture into casts: one window per press.
+    A press still held when the capture ended is marked truncated."""
+    out, cur, cur_id = [], [], 0
+    for s in d:
+        if s[7] != cur_id and cur:
+            out.append((cur, False))
+            cur = []
+        cur_id = s[7]
+        if cur_id:
+            cur.append(s)
+    if cur:
+        out.append((cur, True))
+    return out
 
 
 def mag(v):
@@ -182,7 +203,7 @@ def classify(f):
 def roll(w, deg):
     """Rotate gyro about the board x axis -- simulates the wand held twisted."""
     c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
-    return [r[:5] + [c * r[5] - s * r[6], s * r[5] + c * r[6]] for r in w]
+    return [r[:5] + [c * r[5] - s * r[6], s * r[5] + c * r[6]] + r[7:] for r in w]
 
 
 def steepen(w, deg):
@@ -196,23 +217,26 @@ def steepen(w, deg):
             sign = 1 if p > 0 else -1
             stroke += bool(last and sign != last)
             last = sign
-        out.append(r[:5] + [r[5] + k * abs(r[6]) if stroke == 1 else r[5], r[6]])
+        out.append(r[:5] + [r[5] + k * abs(r[6]) if stroke == 1 else r[5], r[6]] + r[7:])
     return out
 
 
 def retime(w, k):
     """Perform the same motion k times faster (k < 1: slower)."""
     t0 = w[0][0]
-    return [[t0 + (r[0] - t0) / k] + r[1:4] + [x * k for x in r[4:7]] for r in w]
+    return [[t0 + (r[0] - t0) / k] + r[1:4] + [x * k for x in r[4:7]] + r[7:] for r in w]
 
 
 def windows(dirs):
     for d in dirs:
         for p in sorted(Path(d).glob("*.csv")):
             data = load(p)
-            reps = segment(data)
-            if p.stem == "idle":     # a still hold is one whole (non-)cast
+            if any(s[7] for s in data):
+                reps = casts(data)   # the button marked the windows
+            elif p.stem == "idle":   # a still hold is one whole (non-)cast
                 reps = [(data, False)]
+            else:
+                reps = segment(data)
             for w, trunc in reps:
                 yield d.name[11:], p.stem, w, trunc
 
