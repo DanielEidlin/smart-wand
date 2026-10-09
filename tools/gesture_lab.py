@@ -47,6 +47,7 @@ Usage:
     python tools/gesture_lab.py --roll-sweep     # tolerance to wand twist
     python tools/gesture_lab.py --stress         # steep Zs, fast circles, slow thrusts
     python tools/gesture_lab.py --traces bringup/traces/2026-08-16_yuval
+    python tools/gesture_lab.py --dump-windows windows.csv   # for the C++ parity test
 """
 
 import argparse
@@ -264,6 +265,34 @@ def stress(reps):
         tally(f"x{k}", [retime(w, k) for w in tt], "thrust")
 
 
+def dump_windows(reps, path):
+    """Write every window -- real reps plus the --stress and --roll-sweep
+    variants -- with this script's features and verdict, for
+    tests/gesture_parity.cpp to replay through the C++ GestureEngine."""
+    variants = []
+    for who, g, w, _ in reps:
+        variants.append((f"{who}/{g}", w))
+        for deg in (-30, -15, 15, 30):
+            variants.append((f"{who}/{g}/roll{deg:+d}", roll(w, deg)))
+        for k in (0.5, 0.75, 1.5, 2.0, 3.0):
+            variants.append((f"{who}/{g}/x{k}", retime(w, k)))
+        if g == "zigzag":
+            for d in (15, 30, 45, 50, 60):
+                variants.append((f"{who}/{g}/steep{d}", steepen(w, d)))
+    with open(path, "w", newline="") as f:
+        for name, w in variants:
+            # the firmware only ever sees whole milliseconds; retime() makes
+            # fractional ones, so round before computing the reference
+            w = [[float(round(r[0]))] + r[1:] for r in w]
+            ft = features(w)
+            f.write(f"W,{name},{classify(ft)},{ft['dur']:.6f},{ft['peak']:.6f},"
+                    f"{ft['cum']:.6f},{ft['planar']:.6f},{ft['phi']:.6f},"
+                    f"{ft['y1']:.6f},{ft['flips']},{ft['smooth']:.6f}\n")
+            for r in w:
+                f.write("S," + ",".join(f"{x:.6f}" for x in r[:7]) + "\n")
+    print(f"wrote {len(variants)} windows to {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -271,6 +300,8 @@ def main():
                     default=sorted(Path("bringup/traces").glob("*_*")))
     ap.add_argument("--roll-sweep", action="store_true")
     ap.add_argument("--stress", action="store_true")
+    ap.add_argument("--dump-windows", type=Path, metavar="CSV",
+                    help="export windows for tests/gesture_parity.cpp")
     args = ap.parse_args()
 
     reps = [r for r in windows(args.traces) if not r[3]]
@@ -283,6 +314,9 @@ def main():
         return
     if args.stress:
         stress(reps)
+        return
+    if args.dump_windows:
+        dump_windows(reps, args.dump_windows)
         return
 
     print(f"   {'who':6} {'gesture':11} {'got':10} {'dur':>4} {'peak':>5} {'cum':>4}"

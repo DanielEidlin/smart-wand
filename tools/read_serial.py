@@ -29,7 +29,19 @@ def main() -> None:
                     help="write these characters once the port is open")
     args = ap.parse_args()
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.5)
+    # Right after an upload the board re-enumerates and the port is briefly
+    # gone; opening then fails, and every press in that window is lost.
+    # Wait for it instead of failing.
+    wait_until = time.time() + 15
+    while True:
+        try:
+            ser = serial.Serial(args.port, args.baud, timeout=0.5)
+            break
+        except serial.SerialException:
+            if time.time() > wait_until:
+                raise
+            time.sleep(0.5)
+    print(f"# listening on {args.port}", file=sys.stderr, flush=True)
     # Opening the port is what releases a sketch blocked on `while (!Serial)`,
     # so give the board a moment to notice before expecting output.
     time.sleep(0.3)

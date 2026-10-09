@@ -356,6 +356,12 @@ from memory. They cost hours if you get them wrong.
   `blink.ino` bring-up) can link by accident with no explanation as to why, which makes this
   easy to miss until a sketch that actually uses `Serial.println()`/`while (!Serial)` hits it.
   Found bringing up `bringup/ButtonTest/ButtonTest.ino` (2026-08-16).
+  **Corollary: a sketch that never includes `Adafruit_TinyUSB.h` has no USB serial port at all**,
+  so the board vanishes from `board list` and `arduino-cli upload` has nothing to reset it
+  through. The upload then fails, and only the *last* line of its output looks normal ("New
+  upload port"), so always check for "Device programmed". Recover with a RESET double-tap
+  (the bootloader appears on its own COM port, e.g. `COM4`) and upload to that port. Hit
+  2026-10-09 with a serial-free pin-mirror diagnostic.
 - **A single large `Serial.write()` stalls permanently on this core's USB-CDC.** Dumping a 96 KB
   buffer in one call delivered exactly 30,208 bytes at 14.7 KB/s and then nothing, forever, on
   every attempt (measured 2026-08-22 with `bringup/MicTest`). Deterministic, not a race. The fix
@@ -429,7 +435,8 @@ from memory. They cost hours if you get them wrong.
 
 ## Intended layout
 
-Only `README.md`, `CLAUDE.md` and `docs/` exist so far — no firmware yet. Planned structure:
+The `SmartWand/` skeleton exists as of 2026-10-09: gesture engine verified on the host against
+the Python reference, state machine verified on the board. Structure:
 
 ```
 smart-wand/
@@ -438,11 +445,16 @@ smart-wand/
 │   ├── implementation-plan.md    # phased plan of record
 │   └── spell-spec.md             # gesture/incantation prior art and rationale
 ├── SmartWand/                    # main firmware sketch
-│   ├── SmartWand.ino
+│   ├── SmartWand.ino             # IDLE ⇄ CASTING state machine on the button
 │   ├── config.h                  # pins, thresholds, tunables
-│   ├── gestures.{h,cpp}
-│   ├── effects.{h,cpp}
-│   └── power.{h,cpp}
+│   ├── gestures.{h,cpp}          # GestureEngine, port of tools/gesture_lab.py;
+│   │                             #   Arduino-free so it also compiles on the host
+│   ├── spells.h                  # (gesture, optional incantation) -> effect
+│   ├── effects.{h,cpp}           # millis()-driven tip LED, base + transient layers
+│   ├── button.h                  # debounced cast button
+│   └── power.h                   # STUB: low-voltage floor not built yet
+├── tests/
+│   └── gesture_parity.cpp        # C++ engine vs Python reference, host-compiled
 ├── bringup/                      # Phase 1 throwaway test sketches
 │   ├── LedTest/LedTest.ino
 │   ├── ImuTest/ImuTest.ino
@@ -627,6 +639,20 @@ leaves no USB-drive filesystem to drop CSV and WAV files onto.
    discriminator got revised from their original design based on this data.
 2. **Firmware** — gesture recognition from accel+gyro; map gestures to spell animations
    (*Lumos*, *Expelliarmus*, …); idle power optimization.
+   **Skeleton in place and running on the board (2026-10-09).** Bench run with the real button:
+   ~60 casts across several runs, all classified without a hang. Clean run: 4 casts for 4
+   intended presses, the quick tap filtered by `MIN_CAST_MS`, all `none` at 3-18 deg/s (resting
+   gyro noise plus finger pressure, far under the 75 deg/s deadband). Casts with deliberate
+   motion reached the engine at 80-127 deg/s, still `none`, correctly, against flicks at 400+.
+   **Jumper/alligator wiring to the button is too unstable for a gesture capture**: a lead that
+   drops contact mid-swing ends the cast early, splitting one gesture into fragments. Capture
+   needs the printed holder (or soldered leads), not loose clips. `GestureEngine` ports `gesture_lab.py` exactly: the C++
+   and Python agree on all 350 windows (real reps plus the stress and roll variants), checked by
+   `tests/gesture_parity.cpp` on the laptop. **Change a rule in Python first, then C++, then rerun
+   parity**: build and run commands are in that file's header. Effects, the spell table and
+   the state machine compile (7% flash, 6% RAM, mostly the 10 s cast buffer). Still to do:
+   real gestures on a mounted board, wire and tune the LED, the low-voltage floor (`power.h` is a stub, so
+   **don't leave Lumos burning on battery**), IMU FIFO + wake-on-motion, and MCU sleep in IDLE.
 3. **Assembly** — solder 30 AWG to castellated pads, heat shrink every joint, epoxy the LED
    into the tip as a diffuser, hot-glue the stack into the 20 mm bore. Keep the USB-C port,
    switch lever, and cast button accessible.

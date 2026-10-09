@@ -4,3 +4,8 @@ __pycache__/
 
 # Cygwin/Git-Bash crash dumps
 *.stackdump
+
+# gesture parity test build artifacts (tests/gesture_parity.cpp)
+tests/windows.csv
+tests/gesture_parity
+tests/gesture_parity.exe
